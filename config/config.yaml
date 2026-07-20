@@ -1,0 +1,8 @@
+﻿llm:
+  enabled: true
+  provider: deepseek
+  # Store the actual key in the DEEPSEEK_API_KEY environment variable.
+  api_key_env: DEEPSEEK_API_KEY
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+  timeout: 30

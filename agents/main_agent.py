@@ -1,0 +1,592 @@
+﻿from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from importlib import import_module
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+class MainAgent:
+    """Main orchestrator for task understanding, agent scheduling, and integration."""
+
+    agent_name = "MainAgent"
+
+    required_fields = {
+        "task_id",
+        "user_input",
+        "task_type",
+        "user_profile",
+        "context",
+        "input_data",
+        "history",
+        "required_output",
+        "metadata",
+    }
+
+    allowed_agents = {"info_collect", "info_extract", "recommendation", "material"}
+
+    sub_agent_specs = {
+        "info_collect": ("agents.info_collect_agent", "InfoCollectAgent"),
+        "info_extract": ("agents.info_extract_agent", "InfoExtractAgent"),
+        "recommendation": ("agents.recommendation_agent", "RecommendationAgent"),
+        "material": ("agents.material_agent", "MaterialAgent"),
+    }
+
+    def __init__(self, config: dict[str, Any] | None = None):
+        self.config = config or {}
+        self.sub_agents = self._load_sub_agents()
+
+    def run(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        """Only external interface of MainAgent."""
+        task_id = self._get_task_id(input_data)
+
+        try:
+            validation_error = self.validate_input(input_data)
+            if validation_error:
+                return self._build_output(
+                    task_id=task_id,
+                    status="failed",
+                    data={},
+                    message="Input validation failed.",
+                    error=validation_error,
+                )
+
+            return self.process(input_data)
+        except Exception as exc:
+            return self._build_output(
+                task_id=task_id,
+                status="failed",
+                data={},
+                message="MainAgent execution failed.",
+                error={"type": exc.__class__.__name__, "message": str(exc)},
+            )
+
+    def validate_input(self, input_data: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(input_data, dict):
+            return {"message": "input_data must be a dict."}
+
+        missing_fields = sorted(self.required_fields - set(input_data.keys()))
+        if missing_fields:
+            return {"message": "Missing required fields.", "fields": missing_fields}
+
+        dict_fields = ["user_profile", "context", "input_data", "metadata"]
+        invalid_dict_fields = [
+            field for field in dict_fields if not isinstance(input_data.get(field), dict)
+        ]
+        if invalid_dict_fields:
+            return {"message": "These fields must be dict.", "fields": invalid_dict_fields}
+
+        if not isinstance(input_data.get("history"), list):
+            return {"message": "history must be a list."}
+
+        return None
+
+    def process(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        task_id = self._get_task_id(input_data)
+        planning = self.plan_task(input_data)
+        selected_agents = planning.get("selected_agents", [])
+
+        agent_results = []
+        shared_context = dict(input_data.get("context", {}))
+        shared_context["main_agent_plan"] = planning
+
+        for agent_key in selected_agents:
+            agent_input = self._build_agent_input(
+                original_input=input_data,
+                agent_key=agent_key,
+                previous_results=agent_results,
+                shared_context=shared_context,
+            )
+            result = self._call_sub_agent(agent_key, agent_input)
+            agent_results.append(result)
+            shared_context[f"{agent_key}_result"] = result.get("data", {})
+
+        final_data = self.integrate_results(input_data, agent_results, planning)
+        status = self._resolve_final_status(agent_results, planning)
+
+        return self._build_output(
+            task_id=task_id,
+            status=status,
+            data=final_data,
+            message="MainAgent completed orchestration.",
+            error=None if status in {"success", "partial", "need_input"} else final_data.get("errors"),
+            next_action=final_data.get("next_action"),
+            metadata={
+                "selected_agents": selected_agents,
+                "planning_source": planning.get("planning_source"),
+                "agent_statuses": {
+                    result.get("agent_name", "unknown"): result.get("status", "failed")
+                    for result in agent_results
+                },
+            },
+        )
+
+    def plan_task(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        """Use an optional LLM planner, then fall back to deterministic rules."""
+        fallback_agents = self.select_agents(input_data)
+        fallback_plan = self._build_rule_plan(input_data, fallback_agents)
+
+        if not self._is_llm_enabled():
+            return fallback_plan
+
+        llm_plan = self._call_llm_planner(input_data)
+        if not llm_plan.get("ok"):
+            fallback_plan["planning_error"] = llm_plan.get("error")
+            return fallback_plan
+
+        normalized_plan = self._normalize_planning_result(llm_plan.get("data", {}))
+        if not normalized_plan.get("selected_agents") and not normalized_plan.get("need_user_input"):
+            fallback_plan["planning_error"] = {"message": "LLM returned no usable selected_agents."}
+            return fallback_plan
+
+        normalized_plan["planning_source"] = "llm"
+        return normalized_plan
+
+    def select_agents(self, input_data: dict[str, Any]) -> list[str]:
+        """Deterministic fallback scheduler."""
+        task_type = str(input_data.get("task_type", "")).lower()
+        user_input = str(input_data.get("user_input", "")).lower()
+        payload = input_data.get("input_data", {})
+
+        if task_type in {"collect", "info_collect", "data_collect"}:
+            return ["info_collect"]
+        if task_type in {"extract", "info_extract"}:
+            return ["info_extract"]
+        if task_type in {"recommend", "recommendation"}:
+            return ["info_collect", "recommendation"]
+        if task_type in {"material", "generate_material"}:
+            return ["material"]
+        if task_type in {"full_process", "application_assistant", "mvp_demo"}:
+            return self._select_full_process_agents(payload)
+
+        selected = []
+        if any(keyword in user_input for keyword in ["notice", "extract", "field", "deadline"]):
+            selected.append("info_extract")
+        if any(keyword in user_input for keyword in ["recommend", "match", "project", "competition"]):
+            selected.extend(["info_collect", "recommendation"])
+        if any(keyword in user_input for keyword in ["material", "application", "statement", "plan"]):
+            selected.append("material")
+
+        # Chinese keywords are encoded as unicode escapes to avoid source encoding issues.
+        chinese_rules = [
+            (["\u901a\u77e5", "\u62bd\u53d6", "\u5b57\u6bb5"], "info_extract"),
+            (["\u63a8\u8350", "\u5339\u914d", "\u9879\u76ee", "\u7ade\u8d5b"], "recommendation"),
+            (["\u6750\u6599", "\u7533\u8bf7", "\u6587\u4e66", "\u8ba1\u5212"], "material"),
+        ]
+        for keywords, agent_key in chinese_rules:
+            if any(keyword in user_input for keyword in keywords):
+                if agent_key == "recommendation":
+                    selected.extend(["info_collect", "recommendation"])
+                else:
+                    selected.append(agent_key)
+
+        return self._deduplicate(selected) or self._select_full_process_agents(payload)
+
+    def integrate_results(
+        self,
+        input_data: dict[str, Any],
+        agent_results: list[dict[str, Any]],
+        planning: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        planning = planning or {}
+        successful_data = {
+            result.get("agent_name", f"agent_{index}"): result.get("data", {})
+            for index, result in enumerate(agent_results)
+            if result.get("status") in {"success", "partial"}
+        }
+        errors = [
+            {
+                "agent_name": result.get("agent_name", "unknown"),
+                "status": result.get("status", "failed"),
+                "error": result.get("error"),
+                "message": result.get("message", ""),
+            }
+            for result in agent_results
+            if result.get("status") in {"failed", "skipped"}
+        ]
+
+        return {
+            "task_summary": {
+                "task_type": input_data.get("task_type"),
+                "user_input": input_data.get("user_input"),
+            },
+            "planning": planning,
+            "agent_results": agent_results,
+            "integrated_data": successful_data,
+            "errors": errors,
+            "final_answer": self._build_final_answer(agent_results, planning),
+            "next_action": planning.get("suggested_next_action") or self._suggest_next_action(errors),
+        }
+
+    def _call_llm_planner(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        llm_config = self.config.get("llm", {}) if isinstance(self.config, dict) else {}
+        api_key_env = llm_config.get("api_key_env", os.getenv("SAIZHITONG_LLM_API_KEY_ENV", "DEEPSEEK_API_KEY"))
+        api_key = llm_config.get("api_key", "")
+        if not api_key and isinstance(api_key_env, str) and api_key_env.startswith("sk-"):
+            api_key = api_key_env
+        if not api_key:
+            api_key = os.getenv(str(api_key_env), "")
+        if not api_key:
+            return {"ok": False, "error": {"message": f"Missing API key in {api_key_env}."}}
+
+        base_url = llm_config.get("base_url") or os.getenv("DEEPSEEK_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+        model = llm_config.get("model") or os.getenv("DEEPSEEK_MODEL") or os.getenv("OPENAI_MODEL", "deepseek-chat")
+        timeout = int(llm_config.get("timeout", 30))
+        url = base_url.rstrip("/") + "/chat/completions"
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": self._build_planner_system_prompt()},
+                {"role": "user", "content": self._build_planner_user_prompt(input_data)},
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        }
+
+        request = urllib.request.Request(
+            url=url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+            content = response_data["choices"][0]["message"]["content"]
+            return {"ok": True, "data": self._parse_json_object(content)}
+        except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError, TimeoutError) as exc:
+            return {"ok": False, "error": {"type": exc.__class__.__name__, "message": str(exc)}}
+
+    def _is_llm_enabled(self) -> bool:
+        llm_config = self.config.get("llm", {}) if isinstance(self.config, dict) else {}
+        configured = bool(llm_config.get("enabled", False))
+        env_enabled = os.getenv("SAIZHITONG_LLM_ENABLED", "").lower() in {"1", "true", "yes"}
+        deepseek_key_exists = bool(os.getenv("DEEPSEEK_API_KEY", ""))
+        gemini_key_exists = bool(os.getenv("GEMINI_API_KEY", ""))
+        return configured or env_enabled or deepseek_key_exists or gemini_key_exists
+
+    def _build_planner_system_prompt(self) -> str:
+        return """
+You are the Main Agent of a multi-agent system named SaiZhiTong.
+The system helps university students find suitable research projects, competitions, and application opportunities, then assists with recommendation and application materials.
+
+Your responsibility is not to complete the whole task yourself.
+Your responsibility is to understand the user request, decide which sub agents should be called, and define what each sub agent should do.
+
+Available sub agents:
+1. info_collect: collects project or competition information from local data, web data, uploaded files, or APIs.
+2. info_extract: extracts structured fields from unstructured text, such as title, deadline, requirements, materials, links, organizer, category.
+3. recommendation: matches projects with the user profile and provides ranking, scoring, reasons, or Top-N results.
+4. material: generates application checklist, application reason, project introduction, personal statement draft, research plan, timeline, or preparation suggestions.
+
+Return valid JSON only. Do not output markdown. Do not explain outside JSON.
+
+Required JSON schema:
+{
+  "task_type": "",
+  "selected_agents": [],
+  "reason": "",
+  "agent_tasks": {
+    "info_collect": "",
+    "info_extract": "",
+    "recommendation": "",
+    "material": ""
+  },
+  "missing_information": [],
+  "need_user_input": false,
+  "suggested_next_action": ""
+}
+
+Task type must be one of: info_collect, info_extract, recommendation, material, full_process, qa, unknown.
+Only use these agent names: info_collect, info_extract, recommendation, material.
+If the user wants project recommendation, select info_collect and recommendation.
+If the user wants recommendation and application materials, select info_collect, recommendation, and material.
+If the user provides notice text and asks to extract fields, select info_extract.
+If the user provides notice text and wants recommendation, select info_extract and recommendation.
+If the user wants complete application assistance, select info_collect, recommendation, material, and include info_extract only when notice text exists.
+If the user only wants materials based on known project information, select material.
+If no agent is needed, selected_agents must be empty.
+""".strip()
+
+    def _build_planner_user_prompt(self, input_data: dict[str, Any]) -> str:
+        planner_input = {
+            "task_id": input_data.get("task_id"),
+            "user_input": input_data.get("user_input"),
+            "task_type": input_data.get("task_type"),
+            "user_profile": input_data.get("user_profile"),
+            "context": input_data.get("context"),
+            "input_data": input_data.get("input_data"),
+            "history": input_data.get("history"),
+            "required_output": input_data.get("required_output"),
+            "metadata": input_data.get("metadata"),
+        }
+        return "Analyze this standard input and return the planning JSON:\n" + json.dumps(
+            planner_input,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    def _parse_json_object(self, value: str) -> dict[str, Any]:
+        value = value.strip()
+        if value.startswith("```"):
+            value = value.strip("`")
+            if value.lower().startswith("json"):
+                value = value[4:].strip()
+        start = value.find("{")
+        end = value.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            raise json.JSONDecodeError("No JSON object found", value, 0)
+        return json.loads(value[start : end + 1])
+
+    def _normalize_planning_result(self, plan: dict[str, Any]) -> dict[str, Any]:
+        selected_agents = self._deduplicate(
+            [agent for agent in plan.get("selected_agents", []) if agent in self.allowed_agents]
+        )
+        agent_tasks = plan.get("agent_tasks", {})
+        if not isinstance(agent_tasks, dict):
+            agent_tasks = {}
+
+        return {
+            "task_type": str(plan.get("task_type", "unknown")),
+            "selected_agents": selected_agents,
+            "reason": str(plan.get("reason", "")),
+            "agent_tasks": {
+                "info_collect": str(agent_tasks.get("info_collect", "")),
+                "info_extract": str(agent_tasks.get("info_extract", "")),
+                "recommendation": str(agent_tasks.get("recommendation", "")),
+                "material": str(agent_tasks.get("material", "")),
+            },
+            "missing_information": plan.get("missing_information", []) if isinstance(plan.get("missing_information", []), list) else [],
+            "need_user_input": bool(plan.get("need_user_input", False)),
+            "suggested_next_action": str(plan.get("suggested_next_action", "")),
+        }
+
+    def _build_rule_plan(self, input_data: dict[str, Any], selected_agents: list[str]) -> dict[str, Any]:
+        return {
+            "task_type": input_data.get("task_type") or "unknown",
+            "selected_agents": selected_agents,
+            "reason": "Rule-based fallback planning was used.",
+            "agent_tasks": {
+                "info_collect": "Collect project or competition information." if "info_collect" in selected_agents else "",
+                "info_extract": "Extract structured fields from notice or raw text." if "info_extract" in selected_agents else "",
+                "recommendation": "Match projects with user profile and rank results." if "recommendation" in selected_agents else "",
+                "material": "Generate application checklist and draft materials." if "material" in selected_agents else "",
+            },
+            "missing_information": [],
+            "need_user_input": False,
+            "suggested_next_action": "Run selected agents in order and integrate their outputs.",
+            "planning_source": "rule",
+        }
+
+    def _load_sub_agents(self) -> dict[str, Any]:
+        loaded_agents = {}
+        for agent_key, (module_name, class_name) in self.sub_agent_specs.items():
+            try:
+                module = import_module(module_name)
+                agent_class = getattr(module, class_name)
+                loaded_agents[agent_key] = agent_class(self.config)
+            except Exception as exc:
+                loaded_agents[agent_key] = {
+                    "load_error": {
+                        "type": exc.__class__.__name__,
+                        "message": str(exc),
+                        "module": module_name,
+                        "class": class_name,
+                    }
+                }
+        return loaded_agents
+
+    def _call_sub_agent(self, agent_key: str, agent_input: dict[str, Any]) -> dict[str, Any]:
+        agent = self.sub_agents.get(agent_key)
+        task_id = self._get_task_id(agent_input)
+
+        if isinstance(agent, dict) and "load_error" in agent:
+            return self._build_output(
+                task_id=task_id,
+                agent_name=self.sub_agent_specs[agent_key][1],
+                status="skipped",
+                data={},
+                message=f"{agent_key} is not ready and was skipped.",
+                error=agent["load_error"],
+            )
+
+        try:
+            result = agent.run(agent_input)
+            return self._normalize_agent_output(agent_key, task_id, result)
+        except Exception as exc:
+            return self._build_output(
+                task_id=task_id,
+                agent_name=self.sub_agent_specs[agent_key][1],
+                status="failed",
+                data={},
+                message=f"{agent_key} execution failed.",
+                error={"type": exc.__class__.__name__, "message": str(exc)},
+            )
+
+    def _build_agent_input(
+        self,
+        original_input: dict[str, Any],
+        agent_key: str,
+        previous_results: list[dict[str, Any]],
+        shared_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        agent_input = dict(original_input)
+        agent_input["context"] = shared_context
+        agent_input["metadata"] = {
+            **original_input.get("metadata", {}),
+            "called_by": self.agent_name,
+            "target_agent": agent_key,
+            "previous_agent_count": len(previous_results),
+        }
+        agent_input["history"] = [
+            *original_input.get("history", []),
+            {"role": self.agent_name, "event": f"dispatch_to_{agent_key}"},
+        ]
+        return agent_input
+
+    def _normalize_agent_output(self, agent_key: str, task_id: str, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return self._build_output(
+                task_id=task_id,
+                agent_name=self.sub_agent_specs[agent_key][1],
+                status="failed",
+                data={},
+                message="Sub agent returned invalid output type.",
+                error={"message": "Agent output must be a dict."},
+            )
+
+        output = self._build_output(
+            task_id=result.get("task_id", task_id),
+            agent_name=result.get("agent_name", self.sub_agent_specs[agent_key][1]),
+            status=result.get("status", "success"),
+            data=result.get("data", {}),
+            message=result.get("message", ""),
+            error=result.get("error"),
+            next_action=result.get("next_action"),
+            metadata=result.get("metadata", {}),
+        )
+
+        if output["status"] not in {"success", "failed", "partial", "need_input", "skipped"}:
+            output["status"] = "partial"
+            output["metadata"]["normalization_warning"] = "Unknown status was converted to partial."
+
+        return output
+
+    def _select_full_process_agents(self, payload: dict[str, Any]) -> list[str]:
+        selected = ["info_collect"]
+        if payload.get("notification_text") or payload.get("raw_text"):
+            selected.append("info_extract")
+        selected.extend(["recommendation", "material"])
+        return selected
+
+    def _build_final_answer(self, agent_results: list[dict[str, Any]], planning: dict[str, Any] | None = None) -> str:
+        planning = planning or {}
+        if planning.get("need_user_input"):
+            missing = ", ".join(str(item) for item in planning.get("missing_information", []))
+            return f"More user input is needed: {missing}" if missing else "More user input is needed."
+
+        if not agent_results:
+            return "No agent was selected."
+
+        lines = []
+        for result in agent_results:
+            agent_name = result.get("agent_name", "unknown")
+            status = result.get("status", "unknown")
+            message = result.get("message", "")
+            lines.append(f"- {agent_name}: {status}. {message}".strip())
+        return "\n".join(lines)
+
+    def _resolve_final_status(self, agent_results: list[dict[str, Any]], planning: dict[str, Any] | None = None) -> str:
+        planning = planning or {}
+        if planning.get("need_user_input"):
+            return "need_input"
+        if not agent_results:
+            return "success" if not planning.get("selected_agents") else "failed"
+
+        statuses = {result.get("status") for result in agent_results}
+        if statuses <= {"success"}:
+            return "success"
+        if "success" in statuses or "partial" in statuses:
+            return "partial"
+        if "need_input" in statuses:
+            return "need_input"
+        return "failed"
+
+    def _suggest_next_action(self, errors: list[dict[str, Any]]) -> str | None:
+        if not errors:
+            return None
+        return "Check skipped or failed sub agents, then rerun the same standard input."
+
+    def _deduplicate(self, items: list[str]) -> list[str]:
+        seen = set()
+        result = []
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                result.append(item)
+        return result
+
+    def _get_task_id(self, input_data: Any) -> str:
+        if isinstance(input_data, dict) and input_data.get("task_id"):
+            return str(input_data["task_id"])
+        return "unknown_task"
+
+    def _build_output(
+        self,
+        task_id: str,
+        status: str,
+        data: dict[str, Any],
+        message: str,
+        error: Any = None,
+        next_action: Any = None,
+        metadata: dict[str, Any] | None = None,
+        agent_name: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "task_id": task_id,
+            "agent_name": agent_name or self.agent_name,
+            "status": status,
+            "data": data,
+            "message": message,
+            "error": error,
+            "next_action": next_action,
+            "metadata": metadata or {},
+        }
+
+
+if __name__ == "__main__":
+    demo_input = {
+        "task_id": "demo_task_001",
+        "user_input": "Please recommend suitable research competitions and generate an application checklist.",
+        "task_type": "full_process",
+        "user_profile": {
+            "major": "computer science",
+            "grade": "junior",
+            "interests": ["AI", "data analysis"],
+        },
+        "context": {},
+        "input_data": {},
+        "history": [],
+        "required_output": "markdown",
+        "metadata": {"source": "main_agent_demo"},
+    }
+
+    agent = MainAgent(config={})
+    print(json.dumps(agent.run(demo_input), ensure_ascii=False, indent=2))
+
+
+
+
