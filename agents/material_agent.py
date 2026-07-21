@@ -21,6 +21,10 @@ import re
 import json
 from datetime import datetime
 
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt, RGBColor
 from openai import OpenAI
 
 
@@ -462,6 +466,12 @@ class MaterialAgent:
         result = {
             "material_type": material_type,
             "material_name": prompt_template.get("name", ""),
+            "competition_name": (
+                competition_info.get("competition_name")
+                or project_info.get("project_name")
+                or project_info.get("title")
+                or "竞赛申报材料"
+            ),
             "inference_note": inference_note,
             "content": parsed_content,
             "format_spec": prompt_template.get("format_spec", {}),
@@ -976,64 +986,131 @@ class MaterialAgent:
         """
         将生成的材料保存到 data/output/ 目录
 
-        文件命名规则（规范 §13）：
-          application_material_{task_id}_v1.{format}
+        文件命名规则：
+          {竞赛名称}_{材料名称}.docx
 
         Args:
             result: process() 组装的结果 dict
             task_id: 任务编号
-            output_format: 输出格式（markdown / json）
+            output_format: 保留兼容旧调用；下载文件统一生成为 Word
 
         Returns:
             list: 已保存的文件路径列表
         """
-        saved_paths = []
-        task_tag = task_id if task_id else datetime.now().strftime("%Y%m%d_%H%M%S")
+        competition_name = self._safe_filename(
+            str(result.get("competition_name") or "竞赛申报材料")
+        )
+        material_name = self._safe_filename(
+            str(result.get("material_name") or "申报材料")
+        )
+        filename = f"{competition_name}_{material_name}.docx"
+        docx_path = os.path.join(self.output_dir, filename)
+        self._build_docx(result, docx_path)
+        return [docx_path]
 
-        # 1. 保存完整结果为 JSON
-        json_filename = f"application_material_{task_tag}_v1.json"
-        json_path = os.path.join(self.output_dir, json_filename)
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        saved_paths.append(json_path)
+    def _safe_filename(self, value: str) -> str:
+        """Return a readable Windows-safe filename component."""
+        value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" ._")
+        value = re.sub(r"\s+", "", value)
+        return value[:80] or "竞赛申报材料"
 
-        # 2. 保存生成的文本内容为 Markdown
-        md_filename = f"application_material_{task_tag}_v1.md"
-        md_path = os.path.join(self.output_dir, md_filename)
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(f"# {result.get('material_name', 'Material')}\n\n")
-            f.write(f"> 材料类型：{result.get('material_type', '')}\n")
-            f.write(f"> 生成时间：{datetime.now().isoformat()}\n\n")
-            f.write("---\n\n")
+    def _build_docx(self, result: dict, output_path: str) -> None:
+        """Create an editable Word document using a compact reference layout."""
+        document = Document()
+        section = document.sections[0]
+        section.top_margin = Inches(1)
+        section.right_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1)
+        section.header_distance = Inches(0.492)
+        section.footer_distance = Inches(0.492)
 
-            # 写入各部分内容
-            content = result.get("content", {})
-            sections = content.get("sections", [])
-            for section in sections:
-                title = section.get("title", "")
-                sec_content = section.get("content", "")
-                if title:
-                    f.write(f"## {title}\n\n")
-                if sec_content:
-                    f.write(sec_content + "\n\n")
+        styles = document.styles
+        normal = styles["Normal"]
+        normal.font.name = "Microsoft YaHei"
+        normal._element.rPr.rFonts.set(qn("w:eastAsia"), "微软雅黑")
+        normal.font.size = Pt(11)
+        normal.paragraph_format.space_after = Pt(6)
+        normal.paragraph_format.line_spacing = 1.25
 
-            # 写入 checklist
-            checklist = result.get("checklist", [])
-            if checklist:
-                f.write("---\n\n## 准备清单\n\n")
-                for item in checklist:
-                    f.write(f"- [ ] {item}\n")
+        heading_tokens = {
+            "Title": (24, "0B2545", 0, 8),
+            "Heading 1": (16, "2E74B5", 18, 10),
+            "Heading 2": (13, "2E74B5", 14, 7),
+        }
+        for style_name, (size, color, before, after) in heading_tokens.items():
+            style = styles[style_name]
+            style.font.name = "Microsoft YaHei"
+            style._element.rPr.rFonts.set(qn("w:eastAsia"), "微软雅黑")
+            style.font.size = Pt(size)
+            style.font.color.rgb = RGBColor.from_string(color)
+            style.paragraph_format.space_before = Pt(before)
+            style.paragraph_format.space_after = Pt(after)
 
-            # 写入 suggestions
-            suggestions = result.get("suggestions", [])
-            if suggestions:
-                f.write("\n## 填写建议\n\n")
-                for tip in suggestions:
-                    f.write(f"- {tip}\n")
+        for list_style_name in ("List Bullet", "List Number"):
+            list_style = styles[list_style_name]
+            list_style.font.name = "Microsoft YaHei"
+            list_style._element.rPr.rFonts.set(qn("w:eastAsia"), "微软雅黑")
+            list_style.font.size = Pt(11)
+            list_style.paragraph_format.left_indent = Inches(0.375)
+            list_style.paragraph_format.first_line_indent = Inches(-0.188)
+            list_style.paragraph_format.space_after = Pt(4)
+            list_style.paragraph_format.line_spacing = 1.25
 
-        saved_paths.append(md_path)
+        title = document.add_paragraph(style="Title")
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        title.add_run(str(result.get("competition_name") or "竞赛申报材料"))
 
-        return saved_paths
+        subtitle = document.add_paragraph()
+        subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        subtitle.paragraph_format.space_after = Pt(18)
+        run = subtitle.add_run(str(result.get("material_name") or "申报材料"))
+        run.bold = True
+        run.font.size = Pt(14)
+        run.font.color.rgb = RGBColor(80, 80, 80)
+
+        metadata = document.add_paragraph()
+        metadata.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        metadata.paragraph_format.space_after = Pt(18)
+        metadata_run = metadata.add_run(
+            f"材料类型：{result.get('material_type', '')}  |  生成时间：{datetime.now().strftime('%Y-%m-%d')}"
+        )
+        metadata_run.font.size = Pt(9.5)
+        metadata_run.font.color.rgb = RGBColor(100, 100, 100)
+
+        content = result.get("content", {})
+        sections = content.get("sections", []) if isinstance(content, dict) else []
+        for item in sections:
+            if not isinstance(item, dict):
+                continue
+            heading = str(item.get("title") or "").strip()
+            body = str(item.get("content") or "").strip()
+            if heading:
+                document.add_heading(heading, level=1)
+            for block in re.split(r"\n\s*\n", body):
+                block = block.strip()
+                if block:
+                    document.add_paragraph(block)
+
+        checklist = result.get("checklist", [])
+        if checklist:
+            document.add_heading("准备清单", level=1)
+            for item in checklist:
+                document.add_paragraph(str(item), style="List Bullet")
+
+        suggestions = result.get("suggestions", [])
+        if suggestions:
+            document.add_heading("填写建议", level=1)
+            for tip in suggestions:
+                document.add_paragraph(str(tip), style="List Bullet")
+
+        footer = section.footer.paragraphs[0]
+        footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        footer_run = footer.add_run("AI 生成初稿，请根据竞赛官方要求人工核对并完善")
+        footer_run.font.size = Pt(8.5)
+        footer_run.font.color.rgb = RGBColor(120, 120, 120)
+
+        document.save(output_path)
 
     # ============================================================
     # 辅助方法

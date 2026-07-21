@@ -69,8 +69,18 @@ def test_mock_material_generation_and_files(tmp_path, monkeypatch):
     assert result["data"]["material_type"] == "generic_schedule"
     assert result["data"]["content"]["sections"]
     saved_files = result["data"]["_saved_files"]
-    assert len(saved_files) == 2
-    assert all(Path(path).is_file() for path in saved_files)
+    assert len(saved_files) == 1
+    output_path = Path(saved_files[0])
+    assert output_path.is_file()
+    assert output_path.suffix == ".docx"
+    assert "校园智能竞赛助手" in output_path.name
+
+    from docx import Document
+
+    document = Document(output_path)
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert "校园智能竞赛助手" in text
+    assert "准备清单" in text
 
 
 def test_main_agent_adapts_recommended_project(tmp_path):
