@@ -23,7 +23,144 @@ st.set_page_config(
     page_title="赛智通 · 科研竞赛智能助手",
     page_icon="🎓",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
+
+
+GPT_STYLE = """
+<style>
+:root {
+  --szt-bg: #f7f7f8;
+  --szt-sidebar: #171717;
+  --szt-ink: #1f2937;
+  --szt-muted: #6b7280;
+  --szt-line: #e5e7eb;
+  --szt-accent: #10a37f;
+}
+
+[data-testid="stAppViewContainer"] {
+  background: var(--szt-bg);
+  color: var(--szt-ink);
+}
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stToolbar"] { right: 1rem; }
+#MainMenu, footer { visibility: hidden; }
+
+[data-testid="stSidebar"] {
+  background: var(--szt-sidebar);
+  border-right: 1px solid #2b2b2b;
+}
+[data-testid="stSidebar"] * { color: #ececec; }
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+  color: #c5c5c5;
+}
+[data-testid="stSidebar"] .stButton > button {
+  min-height: 44px;
+  border-radius: 10px;
+  border: 1px solid #424242;
+  background: transparent;
+  color: #f5f5f5;
+  font-weight: 600;
+}
+[data-testid="stSidebar"] .stButton > button:hover {
+  border-color: #6b6b6b;
+  background: #2a2a2a;
+}
+
+.block-container {
+  max-width: 920px;
+  padding-top: 2.6rem;
+  padding-bottom: 7.5rem;
+}
+.szt-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 2px 18px;
+  border-bottom: 1px solid var(--szt-line);
+  margin-bottom: 22px;
+}
+.szt-title { font-size: 17px; font-weight: 700; color: #111827; }
+.szt-subtitle { margin-top: 3px; font-size: 12px; color: var(--szt-muted); }
+.szt-online {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 10px; border: 1px solid #d1fae5; border-radius: 999px;
+  background: #ecfdf5; color: #047857; font-size: 12px; font-weight: 650;
+}
+.szt-online::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #10b981; }
+.szt-brand { display:flex; align-items:center; gap:10px; margin: 2px 0 18px; }
+.szt-brand-mark {
+  display:grid; place-items:center; width:34px; height:34px; border-radius:9px;
+  background: var(--szt-accent); color:white !important; font-weight:800;
+}
+.szt-brand-copy strong { display:block; color:#fff; font-size:15px; }
+.szt-brand-copy span { color:#8e8e8e; font-size:11px; }
+.szt-side-label { margin: 18px 0 8px; color:#8e8e8e !important; font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+.szt-state-row { padding: 7px 0; border-bottom: 1px solid #292929; font-size:12px; }
+.szt-state-row b { color:#8e8e8e; font-weight:500; }
+.szt-state-row span { float:right; max-width:62%; color:#f0f0f0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.szt-status-card { padding:10px 12px; border-radius:10px; background:#242424; color:#ddd; font-size:12px; line-height:1.5; }
+
+[data-testid="stChatMessage"] {
+  padding: 1.05rem 1.15rem;
+  margin-bottom: .7rem;
+  border-radius: 16px;
+  border: 1px solid transparent;
+}
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+  background: #ffffff;
+  border-color: var(--szt-line);
+}
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
+  background: transparent;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] {
+  font-size: 15px;
+  line-height: 1.78;
+}
+[data-testid="stChatMessage"] h3 { font-size: 20px; margin: .3rem 0 .8rem; }
+[data-testid="stChatMessage"] a { color: #087f6a; font-weight: 600; text-decoration: none; }
+[data-testid="stChatMessage"] a:hover { text-decoration: underline; }
+
+.szt-welcome { text-align:center; padding: 3.5rem 1rem 1.6rem; }
+.szt-welcome-icon {
+  display:grid; place-items:center; width:48px; height:48px; margin:0 auto 14px;
+  border-radius:14px; background:#111827; color:white; font-weight:800; font-size:19px;
+}
+.szt-welcome h1 { margin:0; font-size:28px; color:#111827; }
+.szt-welcome p { margin:9px auto 0; max-width:560px; color:var(--szt-muted); font-size:14px; }
+.szt-quick-label { text-align:center; color:#9ca3af; font-size:12px; margin: 2px 0 10px; }
+div[data-testid="stHorizontalBlock"] .stButton > button {
+  min-height: 76px; padding: 12px 14px; text-align:left;
+  border:1px solid var(--szt-line); border-radius:14px; background:#fff;
+  color:#374151; font-size:13px; font-weight:600;
+}
+div[data-testid="stHorizontalBlock"] .stButton > button:hover {
+  border-color:#a7f3d0; background:#f0fdf9; color:#047857;
+}
+
+[data-testid="stChatInput"] {
+  border: 1px solid #d1d5db;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 10px 35px rgba(0,0,0,.09);
+}
+[data-testid="stChatInput"]:focus-within { border-color:#9ca3af; }
+.stDownloadButton > button {
+  border-radius:10px; border:1px solid #3f3f3f; background:#262626; color:#fff;
+}
+
+@media (max-width: 768px) {
+  .block-container { padding: .8rem .8rem 6.5rem; }
+  .szt-topbar { padding-right: 2.4rem; }
+  .szt-subtitle, .szt-online { display:none; }
+  [data-testid="stChatMessage"] { padding: .85rem .8rem; }
+  .szt-welcome { padding-top: 2rem; }
+  div[data-testid="stHorizontalBlock"] { flex-direction:column; }
+}
+</style>
+"""
 
 
 def load_cloud_secrets() -> None:
@@ -106,29 +243,27 @@ def run_conversation_turn(prompt: str) -> None:
 
 load_cloud_secrets()
 initialize_session()
+st.markdown(GPT_STYLE, unsafe_allow_html=True)
 
-st.title("🎓 赛智通 · 科研竞赛智能助手")
-st.caption("通过多轮对话收集背景、推荐竞赛，并生成可下载的申报材料初稿")
-
-chat_column, side_column = st.columns([2, 1], gap="large")
-
-with chat_column:
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    if prompt := st.chat_input("告诉我你的专业、年级和参赛目标……"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        run_conversation_turn(prompt)
-        st.rerun()
-
-with side_column:
-    st.subheader("当前进度")
-    st.info(st.session_state.last_status)
+with st.sidebar:
+    st.markdown(
+        """
+        <div class="szt-brand">
+          <div class="szt-brand-mark">智</div>
+          <div class="szt-brand-copy"><strong>赛智通</strong><span>科研竞赛智能助手</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.button("＋  新建对话", on_click=reset_conversation, use_container_width=True)
+    st.markdown('<div class="szt-side-label">当前状态</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="szt-status-card">{st.session_state.last_status}</div>',
+        unsafe_allow_html=True,
+    )
     if not os.getenv("DEEPSEEK_API_KEY", "").strip():
         st.warning(
-            "尚未检测到 DEEPSEEK_API_KEY。系统会保留采集到的基础字段，"
-            "但通知理解和材料内容将使用降级模式。请在 App settings → Secrets 中配置密钥。"
+            "未检测到 API Key，详情与材料内容将使用降级模式。"
         )
 
     state = st.session_state.chat_state
@@ -140,12 +275,15 @@ with side_column:
         "竞赛级别": state.get("competition_level") or "待补充",
         "技能": "、".join(state.get("skills", [])) or "待补充",
     }
-    st.markdown("#### 已记录信息")
+    st.markdown('<div class="szt-side-label">对话记忆</div>', unsafe_allow_html=True)
     for label, value in profile.items():
-        st.markdown(f"**{label}：** {value}")
+        st.markdown(
+            f'<div class="szt-state-row"><b>{label}</b><span>{value}</span></div>',
+            unsafe_allow_html=True,
+        )
 
     if st.session_state.downloads:
-        st.markdown("#### 材料下载")
+        st.markdown('<div class="szt-side-label">生成文件</div>', unsafe_allow_html=True)
         for index, file_path in enumerate(st.session_state.downloads):
             path = Path(file_path)
             if path.is_file():
@@ -162,11 +300,55 @@ with side_column:
                     use_container_width=True,
                 )
 
-    st.button("开始新对话", on_click=reset_conversation, use_container_width=True)
-
-    with st.expander("完整会话状态（调试）"):
+    with st.expander("调试信息"):
         safe_state = {key: value for key, value in state.items() if key != "last_result"}
         st.code(json.dumps(safe_state, ensure_ascii=False, indent=2), language="json")
 
-st.divider()
-st.caption("提示：生成内容为辅助初稿，请勿输入身份证号、密码等敏感信息，正式提交前请人工复核。")
+st.markdown(
+    """
+    <div class="szt-topbar">
+      <div><div class="szt-title">赛智通</div><div class="szt-subtitle">竞赛发现、匹配与申报材料生成</div></div>
+      <div class="szt-online">智能体已就绪</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if len(st.session_state.messages) == 1:
+    st.markdown(
+        """
+        <section class="szt-welcome">
+          <div class="szt-welcome-icon">智</div>
+          <h1>今天想完成什么？</h1>
+          <p>告诉我你的专业、年级和目标，我会通过多轮对话为你推荐竞赛，或生成可编辑的 Word 申报材料。</p>
+        </section>
+        <div class="szt-quick-label">你可以从这些任务开始</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    quick_prompts = [
+        "我是计算机专业大三学生，想参加人工智能竞赛",
+        "帮我提取一份竞赛通知里的报名要求",
+        "根据刚才推荐的竞赛生成报名简历",
+    ]
+    quick_columns = st.columns(3, gap="small")
+    for index, (column, quick_prompt) in enumerate(zip(quick_columns, quick_prompts)):
+        with column:
+            if st.button(quick_prompt, key=f"quick_prompt_{index}", use_container_width=True):
+                st.session_state.messages.append({"role": "user", "content": quick_prompt})
+                run_conversation_turn(quick_prompt)
+                st.rerun()
+
+for message in st.session_state.messages:
+    if len(st.session_state.messages) == 1 and message["role"] == "assistant":
+        continue
+    avatar = "🧠" if message["role"] == "assistant" else "👤"
+    with st.chat_message(message["role"], avatar=avatar):
+        st.markdown(message["content"])
+
+if prompt := st.chat_input("向赛智通发送消息…"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    run_conversation_turn(prompt)
+    st.rerun()
+
+st.caption("赛智通可能会出错。生成内容和竞赛信息请以主办方最新通知为准，提交前请人工复核。")
