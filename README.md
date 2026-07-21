@@ -22,6 +22,24 @@ Render 使用以下配置：
 `data/output` 中的材料文件在免费实例上属于临时数据，服务重启或重新部署后可能丢失；
 如需长期保存，应配置 Render Persistent Disk 或对象存储。
 
+## 部署到 Streamlit Community Cloud
+
+不使用 Render 时，可以通过根目录的 `streamlit_app.py` 免费部署：
+
+1. 访问 `https://share.streamlit.io` 并使用 GitHub 登录。
+2. 创建 App，选择本仓库和 `main` 分支。
+3. Main file path 填写 `streamlit_app.py`。
+4. 在 Advanced settings 的 Secrets 中填写：
+
+   ```toml
+   DEEPSEEK_API_KEY = "你的密钥"
+   ```
+
+5. Python version 选择 3.11，然后点击 Deploy。
+
+Streamlit 页面复用与 Gradio 页面相同的多智能体后端，支持多轮对话、上下文追问和材料下载。
+私有 GitHub 仓库部署出的 App 默认也是私有的；如需无需登录即可公开访问，应使用公开仓库。
+
 赛智通是面向大学生科研竞赛申请的轻量级多智能体辅助系统。
 
 ## 项目结构

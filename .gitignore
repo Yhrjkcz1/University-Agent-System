@@ -18,6 +18,7 @@ env/
 .env.*
 !.env.example
 config/config.local.yaml
+.streamlit/secrets.toml
 
 # Runtime output
 logs/
@@ -34,4 +35,3 @@ docs/internal/
 .vscode/
 .DS_Store
 Thumbs.db
-
