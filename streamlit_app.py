@@ -141,7 +141,11 @@ with side_column:
                     label=f"下载 {path.name}",
                     data=path.read_bytes(),
                     file_name=path.name,
-                    mime="application/json" if path.suffix == ".json" else "text/markdown",
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        if path.suffix.lower() == ".docx"
+                        else "application/octet-stream"
+                    ),
                     key=f"download_{index}_{path.name}",
                     use_container_width=True,
                 )
