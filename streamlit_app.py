@@ -167,7 +167,7 @@ def load_cloud_secrets() -> None:
     """Expose Streamlit secrets through the environment expected by agents."""
     try:
         api_key = str(st.secrets.get("DEEPSEEK_API_KEY", "")).strip()
-    except FileNotFoundError:
+    except Exception:
         api_key = ""
     if api_key:
         os.environ["DEEPSEEK_API_KEY"] = api_key
