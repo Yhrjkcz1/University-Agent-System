@@ -549,6 +549,26 @@ def _correction_value_text(text: str) -> str:
     return text
 
 
+def _looks_like_notification(text: str) -> bool:
+    """Return True only when the text carries at least one structural signal that
+    suggests it is a pasted competition notice, not just a long chat message
+    listing skills or describing background."""
+    notification_indicators = [
+        # URL
+        r"https?://",
+        # date patterns
+        r"\d{4}年\d{1,2}月\d{1,2}日",
+        r"\d{4}-\d{1,2}-\d{1,2}",
+        r"\d{4}/\d{1,2}/\d{1,2}",
+        # competition structural keywords
+        r"主办方", r"承办方", r"协办方", r"主办单位", r"承办单位",
+        r"参赛对象", r"参赛资格", r"作品要求", r"申报材料",
+        r"报名方式", r"报名截止", r"竞赛简介", r"奖项设置",
+        r"关于举办", r"通知", r"公告",
+    ]
+    return any(re.search(indicator, text) for indicator in notification_indicators)
+
+
 def _update_chat_state(state: dict[str, Any], message: str) -> dict[str, Any]:
     state = {**new_chat_state(), **(state or {})}
     text = clean_text(message)
@@ -589,12 +609,19 @@ def _update_chat_state(state: dict[str, Any], message: str) -> dict[str, Any]:
         "程序设计": "算法与程序设计", "创新创业": "创新创业", "创业": "创新创业",
         "科研": "科研学术", "数据分析": "数据分析", "数学建模": "数学建模",
     }
-    for keyword, normalized in type_aliases.items():
-        if keyword in fact_text:
-            state["competition_type"] = normalized
-            if normalized not in state["interests"]:
-                state["interests"] = [*state["interests"], normalized]
-            break
+    # Only set competition_type from type_aliases when it hasn't been set yet,
+    # or when the user is explicitly correcting it.  This prevents a skill
+    # keyword like "数据分析" or "算法" from overwriting the competition
+    # direction the user stated earlier (e.g. "人工智能").
+    if not state.get("competition_type") or any(
+        marker in fact_text for marker in ["不是", "改成", "更正", "应该是", "换成", "改为"]
+    ):
+        for keyword, normalized in type_aliases.items():
+            if keyword in fact_text:
+                state["competition_type"] = normalized
+                if normalized not in state["interests"]:
+                    state["interests"] = [*state["interests"], normalized]
+                break
 
     known_skills = ["Python", "Java", "C++", "机器学习", "深度学习", "数据分析", "文案写作", "团队协作"]
     for skill in known_skills:
@@ -607,7 +634,7 @@ def _update_chat_state(state: dict[str, Any], message: str) -> dict[str, Any]:
     ):
         state["skills_skipped"] = True
 
-    if len(text) >= 80:
+    if len(text) >= 80 and _looks_like_notification(text):
         state["notification_text"] = text
 
     if "项目名称" in fact_text or "竞赛名称" in fact_text:
