@@ -604,6 +604,13 @@ def _update_chat_state(state: dict[str, Any], message: str) -> dict[str, Any]:
             state["competition_level"] = level
             break
 
+    if not state.get("competition_level"):
+        fuzzy_level = [
+            "都可以", "都行", "不限", "无所谓", "随便", "没要求",
+            "没有硬性要求", "无偏好", "不限级别", "级别不限",
+        ]
+        if any(word in fact_text for word in fuzzy_level):
+            state["competition_level"] = "不限"
     type_aliases = {
         "人工智能": "人工智能", "AI": "人工智能", "算法": "算法与程序设计",
         "程序设计": "算法与程序设计", "创新创业": "创新创业", "创业": "创新创业",
@@ -725,7 +732,15 @@ def _chat_standard_input(state: dict[str, Any], message: str) -> dict:
         payload.update({"data_source": "web", "source_url": "https://www.saikr.com/"})
 
     if state.get("competition_type"):
-        payload["keywords"] = [state["competition_type"], state.get("competition_level", "")]
+        keywords = []
+        ct = state.get("competition_type", "")
+        cl = state.get("competition_level", "")
+        if ct and ct != "不限":
+            keywords.append(ct)
+        if cl and cl != "不限":
+            keywords.append(cl)
+        if keywords:
+            payload["keywords"] = keywords
     if state.get("material_type"):
         payload["material_type"] = state["material_type"]
     if state.get("project_name"):
