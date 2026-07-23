@@ -764,6 +764,7 @@ def _update_chat_state(
     material_map = {
         "报名简历": "generic_personal_resume", "个人简历": "generic_personal_resume",
         "简历": "generic_personal_resume", "报名表": "generic_application_form",
+        "申报书": "generic_application_form", "申报表": "generic_application_form",
         "计划书": "innovation_contest_business_plan",
         "PPT": "generic_ppt", "进度表": "generic_schedule", "清单": "challenge_cup_grand_checklist",
     }
@@ -978,6 +979,9 @@ def _next_chat_question(state: dict[str, Any]) -> str | None:
     if state["intent"] in {"material", "full_process"}:
         has_previous = bool(state.get("last_result"))
         if not state.get("notification_text") and not state.get("project_name") and not has_previous:
+            # 如果用户已指定竞赛类型+材料类型+基本信息，放行让 MaterialAgent 自己追问
+            if state.get("material_type"):
+                return None
             return "可以。把竞赛通知贴给我，或者直接告诉我项目名称，我就能接着帮你准备材料。"
         recommendations = _recommendations_from_chat_state(state)
         if not state.get("project_name") and len(recommendations) > 1:
