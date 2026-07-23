@@ -406,13 +406,26 @@ class MaterialAgent:
         style = inner.get("style", self.default_style)
         output_format = input_data.get("required_output", "markdown")
 
+        # ---- Step 0: 诊断信息 ----
+        diag = {
+            "api_key_loaded": bool(self.api_key),
+            "api_base_url": self.api_base_url,
+            "model_name": self.model_name,
+            "model_provider": self.model_provider,
+            "templates_loaded": len(self.prompt_templates),
+        }
+
         # ---- Step 1: 提取数据 ----
         project_info = inner.get("project_info", {})
         user_profile = inner.get("user_profile", {})
         competition_info = inner.get("competition_info", {})
         requirements = inner.get("requirements", {})
+        diag["project_name"] = project_info.get("project_name", "")
+        diag["material_type_raw"] = inner.get("material_type", "")
+        diag["has_competition_info"] = bool(competition_info)
 
         # ---- Step 2: 推断或验证 material_type ----
+        diag["material_type_before_infer"] = material_type
         if not material_type:
             user_input = input_data.get("user_input", "")
             inference = self._infer_material_type(competition_info, user_input)
@@ -431,11 +444,15 @@ class MaterialAgent:
 
             # 推断成功，记录来源
             inference_note = f"（自动推断：{inference['message']}）"
+            diag["inference_used"] = True
+            diag["inference_result"] = material_type
         else:
             inference_note = ""
+            diag["inference_used"] = False
 
         # ---- Step 3: 预检关键字段，缺太多则追问 ----
         missing_check = self._check_missing_fields(project_info, material_type, user_profile)
+        diag["missing_check_triggered"] = missing_check["need_input"]
         if missing_check["need_input"]:
             return {
                 "_status": "need_input",
@@ -483,6 +500,7 @@ class MaterialAgent:
                 or "竞赛申报材料"
             ),
             "inference_note": inference_note,
+            "_diagnostics": diag,
             "content": parsed_content,
             "format_spec": prompt_template.get("format_spec", {}),
             "checklist": prompt_template.get("checklist", []),
