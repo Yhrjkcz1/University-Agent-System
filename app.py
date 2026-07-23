@@ -579,6 +579,26 @@ def _append_unique(values: list[str], value: str) -> list[str]:
     return values if value in values else [*values, value]
 
 
+def _looks_like_notification(text: str) -> bool:
+    """Return True only when the text carries at least one structural signal that
+    suggests it is a pasted competition notice, not just a long chat message
+    listing skills or describing background."""
+    notification_indicators = [
+        # URL
+        r"https?://",
+        # date patterns
+        r"\d{4}年\d{1,2}月\d{1,2}日",
+        r"\d{4}-\d{1,2}-\d{1,2}",
+        r"\d{4}/\d{1,2}/\d{1,2}",
+        # competition structural keywords
+        r"主办方", r"承办方", r"协办方", r"主办单位", r"承办单位",
+        r"参赛对象", r"参赛资格", r"作品要求", r"申报材料",
+        r"报名方式", r"报名截止", r"竞赛简介", r"奖项设置",
+        r"关于举办", r"通知", r"公告",
+    ]
+    return any(re.search(indicator, text) for indicator in notification_indicators)
+
+
 def _update_chat_state(
     state: dict[str, Any],
     message: str,
@@ -662,18 +682,25 @@ def _update_chat_state(
         "营销策划": "商业与营销", "市场营销": "商业与营销", "控制类": "自动化与控制",
         "电子设计": "电子设计", "机器人": "机器人", "后端开发": "软件开发",
     }
-    for keyword, normalized in type_aliases.items():
-        if keyword in fact_text:
-            if _contains_negated_term(fact_text, keyword):
-                state["excluded_competition_types"] = _append_unique(
-                    state.get("excluded_competition_types", []), normalized
-                )
-                continue
-            state["competition_type"] = normalized
-            state["competition_type_confirmed"] = True
-            if normalized not in state["interests"]:
-                state["interests"] = [*state["interests"], normalized]
-            break
+    # Only set competition_type from type_aliases when it hasn't been set yet,
+    # or when the user is explicitly correcting it.  This prevents a skill
+    # keyword like "数据分析" or "算法" from overwriting the competition
+    # direction the user stated earlier (e.g. "人工智能").
+    if not state.get("competition_type") or any(
+        marker in fact_text for marker in ["不是", "改成", "更正", "应该是", "换成", "改为"]
+    ):
+        for keyword, normalized in type_aliases.items():
+            if keyword in fact_text:
+                if _contains_negated_term(fact_text, keyword):
+                    state["excluded_competition_types"] = _append_unique(
+                        state.get("excluded_competition_types", []), normalized
+                    )
+                    continue
+                state["competition_type"] = normalized
+                state["competition_type_confirmed"] = True
+                if normalized not in state["interests"]:
+                    state["interests"] = [*state["interests"], normalized]
+                break
 
     if any(phrase in fact_text for phrase in [
         "方向没有偏好", "方向都可以", "不限方向", "方向不限", "什么方向都行",
@@ -720,7 +747,7 @@ def _update_chat_state(
     elif any(phrase in fact_text for phrase in ["团队赛", "组队参加", "想组队", "有团队"]):
         state["team_preference"] = "团队赛"
 
-    if len(text) >= 80:
+    if len(text) >= 80 and _looks_like_notification(text):
         state["notification_text"] = text
 
     if "项目名称" in fact_text or "竞赛名称" in fact_text:
