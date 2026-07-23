@@ -155,7 +155,7 @@ class InfoCollectAgent:
         """核心业务逻辑：根据 sources 类型分发到网页爬虫或本地文件解析。"""
         inner = input_data.get("input_data", {})
         task_id = input_data.get("task_id", "unknown")
-        sources = inner.get("sources", ["saikr"])
+        sources = inner.get("sources", SourceRegistry.list_all())
 
         storage = self._get_storage()
         all_items = []

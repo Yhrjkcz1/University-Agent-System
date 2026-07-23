@@ -1,7 +1,12 @@
-"""阿里天池客户端 — 通过页面抓取获取竞赛数据。
+"""阿里天池客户端 — 通过 Open API 获取竞赛数据。
 
-现状: 天池竞赛列表页为服务端渲染，API 端点均需登录。使用 HTML 抓取作为主要方式。
-竞赛链接格式: https://tianchi.aliyun.com/competition/{id}
+API:
+  GET /v3/proxy/competition/api/race/page
+    参数: visualTab(分类), raceName(搜索), pageNum, pageSize, isAll=true
+    返回: {data: {list: [{raceId, name, introduction, raceStartTime, raceEndTime,
+           signupStartTime, signupEndTime, bonus, teamCount, tagsList, trackList, ...}]}}
+
+  isSeries=1 的竞赛有 trackList 子赛道，isSeries=0 的为独立赛道。
 """
 
 import logging
@@ -10,11 +15,12 @@ from .base import BaseSourceClient
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://tianchi.aliyun.com"
+API_URL = f"{BASE_URL}/v3/proxy/competition/api/race/page"
 
 TIANCHI_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Referer": "https://tianchi.aliyun.com/",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://tianchi.aliyun.com/competition",
 }
 
 
@@ -23,20 +29,32 @@ class TianchiClient(BaseSourceClient):
     def _default_headers(self) -> dict:
         return TIANCHI_HEADERS
 
-    def get_contests(self, page: int = 1, limit: int = 20) -> str:
-        """获取竞赛列表页 HTML（SSR 页面）。"""
-        resp = self.get_with_retry(f"{BASE_URL}/competition",
-                                   params={"page": page} if page > 1 else None)
-        return resp.text
+    def get_contests(self, page: int = 1, limit: int = 20) -> dict:
+        """获取竞赛列表。
 
-    def get_contest_detail(self, contest_id: str) -> str:
-        """获取竞赛详情页 HTML。
-
-        contest_id: 竞赛 ID，如 "532495"，或完整 URL。
+        GET /v3/proxy/competition/api/race/page
         """
-        if contest_id.startswith("http"):
-            url = contest_id
-        else:
-            url = f"{BASE_URL}/competition/{contest_id}"
-        resp = self.get_with_retry(url)
-        return resp.text
+        resp = self.get_with_retry(API_URL, params={
+            "visualTab": "",
+            "raceName": "",
+            "pageNum": page,
+            "pageSize": limit,
+            "isAll": "true",
+        })
+        return resp.json()
+
+    def get_contest_detail(self, contest_id: str) -> dict:
+        """获取竞赛详情。
+
+        contest_id: raceId，如 "532503"。
+        详情信息已在列表 API 的 introduction/trackList 字段中，此方法返回空。
+        """
+        # 天池的列表 API 已经包含 introduction + bonus + teamCount + tagsList
+        # 详情页为 SSR HTML，不再单独请求
+        return {}
+
+    def get_config(self) -> dict:
+        return {}
+
+    def get_featured(self) -> list[dict]:
+        return []

@@ -177,7 +177,7 @@ def test_crawl_live(source: str, keywords: list[str] | None = None, timeout: int
     print(f"开始爬取 {source} ...")
 
     try:
-        items, stats = crawler.crawl(keywords, [source], max_results=5, log_id=log_id)
+        items, stats = crawler.crawl(keywords, [source], max_results=10, log_id=log_id)
         pages = stats.get("pages_crawled", 0)
         total = stats.get("items_found", 0)
         new = stats.get("items_new", 0)

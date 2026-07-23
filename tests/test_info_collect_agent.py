@@ -82,7 +82,10 @@ def test_main_agent_adapts_saikr_web_input():
     )
     adapted = main_agent._adapt_info_collect_input(original)
 
-    assert adapted["sources"] == ["saikr"]
+    # 现在默认爬取所有注册的 web 数据源
+    from agents.info_collect.registry import SourceRegistry
+    all_sources = SourceRegistry.list_all()
+    assert sorted(adapted["sources"]) == sorted(all_sources)
     assert adapted["keywords"] == ["人工智能"]
 
 
@@ -93,7 +96,10 @@ def test_main_agent_does_not_mislabel_unknown_websites():
     )
     adapted = main_agent._adapt_info_collect_input(original)
 
-    assert "sources" not in adapted or not adapted["sources"]
+    # 现在 data_source="web" 默认爬全部注册的 web 源，不依赖 URL
+    from agents.info_collect.registry import SourceRegistry
+    assert len(adapted["sources"]) >= 1
+    assert all(s in SourceRegistry.list_all() for s in adapted["sources"] if s != "local_file")
 
 
 def test_main_agent_runs_local_collection_end_to_end(tmp_path: Path):
@@ -222,50 +228,105 @@ def test_jingsai52_parser_html_list():
 def test_tianchi_parser_json_list():
     from agents.info_collect.parsers.tianchi import TianchiParser
     parser = TianchiParser({})
+    # 天池实际 API 格式: {data: {list: [{raceId, name, isSeries, raceStartTime, ...}]}}
     api_response = {
         "data": {
             "list": [
                 {
-                    "title": "天池大数据竞赛",
-                    "competitionUrl": "/competition/500",
-                    "gmtCreate": "2026-01-15",
-                    "organizer": "阿里巴巴",
+                    "raceId": 532503,
+                    "name": "天池大数据挑战赛",
+                    "isSeries": 0,
+                    "raceStartTime": "2026-03-15 00:00:00",
+                    "raceEndTime": "2026-08-30 00:00:00",
+                    "signupEndTime": "2026-07-31 00:00:00",
+                    "introduction": "阿里云天池经典赛事",
+                    "bonus": 500000,
+                    "teamCount": 2000,
+                    "tagsList": [
+                        {"tagNameCn": "数据分析", "tagId": 1},
+                        {"tagNameCn": "机器学习", "tagId": 2},
+                    ],
+                    "visualTab": 1,
                 }
             ]
         }
     }
     result = parser.parse_list(api_response)
     assert len(result) == 1
-    assert result[0]["title"] == "天池大数据竞赛"
+    assert result[0]["title"] == "天池大数据挑战赛"
     assert result[0]["source"] == "ali_tianchi"
-    assert result[0]["organizer"] == "阿里巴巴"
+    assert result[0]["publish_date"] == "2026-03-15"
+    assert result[0]["regist_end"] == "2026-07-31"
+    assert result[0]["category"] == "数据分析, 机器学习"
+    assert result[0]["bonus"] == 500000
+
+
+def test_tianchi_series_race_expand():
+    from agents.info_collect.parsers.tianchi import TianchiParser
+    parser = TianchiParser({})
+    # 系列赛展开为子赛道
+    api_response = {
+        "data": {
+            "list": [
+                {
+                    "raceId": 38,
+                    "name": "系列赛主标题",
+                    "isSeries": 1,
+                    "raceStartTime": "2026-07-17 00:00:00",
+                    "raceEndTime": "2026-10-27 00:00:00",
+                    "bonus": 200000,
+                    "tagsList": [{"tagNameCn": "多模态"}],
+                    "visualTab": 1,
+                    "trackList": [
+                        {"raceId": 532503, "name": "子赛道1", "signupEndTime": "2026-10-20 00:00:00", "introduction": "子赛道1描述"},
+                        {"raceId": 532504, "name": "子赛道2", "signupEndTime": "2026-10-20 00:00:00", "introduction": ""},
+                    ]
+                }
+            ]
+        }
+    }
+    result = parser.parse_list(api_response)
+    assert len(result) == 2
+    assert result[0]["title"] == "系列赛主标题 - 子赛道1"
+    assert result[1]["title"] == "系列赛主标题 - 子赛道2"
+    assert result[0]["regist_end"] == "2026-10-20"
+    assert result[0]["description"] == "子赛道1描述"
 
 
 def test_heywhale_parser_json_list():
     from agents.info_collect.parsers.heywhale import HeywhaleParser
     parser = HeywhaleParser({})
+    # 和鲸实际 API 格式: {"data": [{_id, Name, StartDate, EndDate, DetailType, ...}, ...]}
     api_response = {
-        "data": {
-            "results": [
-                {
-                    "title": "和鲸数据科学竞赛",
-                    "competition_url": "/competition/300",
-                    "create_time": "2026-02-20",
-                    "organizer": "和鲸社区",
-                }
-            ]
-        }
+        "totalNum": 2,
+        "data": [
+            {
+                "_id": "69c0dfa34f302f8f0122e1bb",
+                "Name": "和鲸大数据挑战赛",
+                "StartDate": "2026-03-26T02:00:00.000Z",
+                "EndDate": "2026-09-29T16:00:00.000Z",
+                "RegisterEndDate": "2026-07-15T04:00:00.000Z",
+                "DetailType": "ALGORITHM",
+                "ShortDescription": "大数据挑战赛",
+                "UsersNumber": 5457,
+                "TeamsNumber": 3393,
+            }
+        ]
     }
     result = parser.parse_list(api_response)
     assert len(result) == 1
-    assert result[0]["title"] == "和鲸数据科学竞赛"
+    assert result[0]["title"] == "和鲸大数据挑战赛"
     assert result[0]["source"] == "heywhale"
+    assert result[0]["regist_end"] == "2026-07-15"
+    assert result[0]["category"] == "算法赛"
 
 
 def test_datafountain_parser_json_list():
     from agents.info_collect.parsers.datafountain import DatafountainParser
     parser = DatafountainParser({})
     # 使用 DataFountain 实际 API 格式: {"cmpt": {"competitions": [...]}}
+    # DF 实际 API 格式: {cmpt: {competitions: [{id, title, start/endTime,
+    #   organizers: [{name, roleName}], tags: [{nameCn}], typeLabel, ...}]}}
     api_response = {
         "cmpt": {
             "competitions": [
@@ -275,9 +336,14 @@ def test_datafountain_parser_json_list():
                     "subTitle": "赛题描述",
                     "startTime": "2026-03-01T00:00:00.000Z",
                     "endTime": "2026-06-01T00:00:00.000Z",
-                    "tags": ["数据挖掘", "AI"],
-                    "typeLabel": "算法赛",
-                    "organizers": [{"name": "中国计算机学会"}],
+                    "orderTime": "2026-03-01T00:00:00.000Z",
+                    "tags": [{"nameCn": "数据挖掘"}, {"nameCn": "AI"}],
+                    "typeLabel": "智能算法",
+                    "organizers": [{"name": "中国计算机学会", "roleName": "主办单位"}],
+                    "race": {"startTime": "2026-04-01T00:00:00.000Z", "endTime": "2026-07-01T00:00:00.000Z"},
+                    "reward": "100000",
+                    "teams": 500,
+                    "users": 1200,
                 }
             ]
         }
@@ -286,7 +352,13 @@ def test_datafountain_parser_json_list():
     assert len(result) == 1
     assert result[0]["title"] == "DF数据挖掘大赛"
     assert result[0]["source"] == "datafountain"
+    assert result[0]["publish_date"] == "2026-03-01"
     assert result[0]["regist_end"] == "2026-06-01"
+    assert result[0]["contest_start"] == "2026-04-01"
+    assert result[0]["category"] == "智能算法, 数据挖掘, AI"
+    assert result[0]["organizer"] == "中国计算机学会"
+    assert result[0]["organizer_list"] == ["中国计算机学会"]
+    assert result[0]["reward"] == "100000"
     assert "datafountain.cn/competitions/800" in result[0]["url"]
 
 
@@ -312,21 +384,35 @@ def test_new_parsers_handle_empty_data():
 def test_datafountain_parser_detail():
     from agents.info_collect.parsers.datafountain import DatafountainParser
     parser = DatafountainParser({})
-    # 实际 API 详情格式
     detail = {
         "id": 1169,
         "title": "AI人才-星探计划",
         "cmptDescription": "<p>本竞赛旨在发现AI人才</p>",
+        "cmptDataDescription": "**附录**\\n\\n提交要求...",
         "startTime": "2026-04-06T16:00:00.000Z",
         "endTime": "2026-08-31T15:59:59.000Z",
-        "reward": "¥100,000",
-        "totalBonus": 100000,
+        "reward": "¥90,000",
+        "totalBonus": 90000,
+        "organizers": [{"name": "烟台睿创微纳技术股份有限公司", "roleName": "主办单位"}],
+        "schedules": [
+            {"title": "第一阶段", "startTime": "2026-04-07T00:00:00+08:00", "endTime": "2026-06-10T23:59:59+08:00"},
+            {"title": "第二阶段", "startTime": "2026-06-20T00:00:00+08:00", "endTime": "2026-08-20T23:59:59+08:00"},
+        ],
     }
     result = parser.parse_detail(detail)
     assert "发现AI人才" in result["description"]
+    assert "附录" in result["description"]  # cmptDataDescription merged in
     assert result["regist_start"] == "2026-04-06"
-    assert result["regist_end"] == "2026-08-31"
-    assert result["reward"] == "¥100,000"
+    assert result["organizer"] == "烟台睿创微纳技术股份有限公司"
+    assert result["reward"] == "¥90,000"
+    assert len(result["stages"]) == 2
+
+    # merge_detail should NOT overwrite list values
+    list_item = {"description": "简短摘要", "organizer": "列表中的主办方", "regist_end": "2026-08-31"}
+    merged = parser.merge_detail(list_item, result)
+    assert merged["description"] == result["description"]  # detail更完整，替换
+    assert merged["organizer"] == "列表中的主办方"  # 列表已有，不覆盖
+    assert merged["regist_end"] == "2026-08-31"  # 列表已有，不覆盖
 
 
 def test_base_client_has_retry_config():

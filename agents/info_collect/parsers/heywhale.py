@@ -1,4 +1,4 @@
-"""和鲸社区数据解析器 — 从 HTML 页面提取竞赛数据。"""
+"""和鲸社区数据解析器 — 将 API JSON 转换为 raw_item。"""
 
 import json
 from datetime import datetime
@@ -7,64 +7,165 @@ from .base import BaseParser
 
 DETAIL_BASE = "https://www.heywhale.com"
 
+# DetailType 映射
+TYPE_MAP = {
+    "ALGORITHM": "算法赛",
+    "SCHEME": "方案赛",
+    "LIVE": "交流活动",
+    "CREATIVE": "创意赛",
+    "CHALLENGE": "挑战赛",
+    "HACKATHON": "黑客松",
+    "TRAINING_CAMP": "训练营",
+    "DATA_ANALYSIS": "数据分析",
+    "OTHER": "其他",
+}
+
 
 class HeywhaleParser(BaseParser):
     """解析和鲸社区竞赛数据。"""
 
     def __init__(self, config: dict):
         super().__init__(config)
+        self._categories: dict[str, str] = {}
+
+    def configure(self, config_data):
+        """建立 category Key → Name 映射。"""
+        if isinstance(config_data, dict):
+            for item in config_data.get("data", []):
+                key = item.get("Key", "")
+                name = item.get("Name", "")
+                if key and name:
+                    self._categories[key] = name
+
+    # ---- 列表解析 ----
 
     def parse_list(self, data) -> list[dict]:
-        """解析列表数据。"""
-        if isinstance(data, dict):
-            return self._parse_json_list(data)
-        if isinstance(data, str) and data.strip().startswith("{"):
-            return self._parse_json_list(json.loads(data))
-        return self._parse_html_list(data) if isinstance(data, str) else []
+        """解析 API JSON 列表。"""
+        if isinstance(data, dict) and "data" in data:
+            return self._parse_api_list(data)
+        if isinstance(data, str):
+            if data.strip().startswith("{"):
+                return self._parse_api_list(json.loads(data))
+            return self._parse_html_list(data)
+        return []
 
-    def _parse_json_list(self, data: dict) -> list[dict]:
-        items = (
-            data.get("data", {}).get("list")
-            or data.get("data", {}).get("results")
-            or data.get("data")
-            or data.get("list")
-            or data.get("results")
-            or []
-        )
+    def _parse_api_list(self, data: dict) -> list[dict]:
+        items = data.get("data", [])
+        # 兼容 {"data": {"results": [...]}} 格式
         if isinstance(items, dict):
-            items = items.get("list") or items.get("results") or []
+            items = items.get("results") or items.get("list") or items.get("records") or []
         if not isinstance(items, list):
             return []
+        return [self._parse_list_item(item) for item in items]
 
-        return [self._parse_json_item(item) for item in items]
-
-    def _parse_json_item(self, item: dict) -> dict:
-        url = item.get("url") or item.get("competition_url") or item.get("share_url") or ""
-        if url and not url.startswith("http"):
-            url = DETAIL_BASE + url
+    def _parse_list_item(self, item: dict) -> dict:
+        cid = item.get("_id", "")
         return {
-            "title": item.get("title") or item.get("name") or item.get("competition_name") or "",
-            "url": url,
+            "title": item.get("Name", ""),
+            "url": f"{DETAIL_BASE}/competition/{cid}",
             "source": "heywhale",
             "raw_text": json.dumps(item, ensure_ascii=False),
-            "publish_date": item.get("create_time") or item.get("publish_date") or "",
+            "publish_date": _fmt_iso(item.get("StartDate")),
             "collected_at": datetime.now().isoformat(),
-            "description": item.get("description") or item.get("brief") or "",
-            "organizer": item.get("organizer") or item.get("organizer_name") or "",
-            "regist_start": item.get("sign_up_start") or item.get("regist_start_time") or "",
-            "regist_end": item.get("sign_up_end") or item.get("regist_end_time") or item.get("deadline") or "",
-            "contest_start": item.get("start_time") or "",
-            "contest_end": item.get("end_time") or "",
-            "category": item.get("category") or item.get("tag") or "",
-            "level": item.get("level") or "",
+            "description": (item.get("ShortDescription") or ""),
+            "organizer": "",
+            "organizer_list": [],
+            "co_organizers": [],
+            "supporters": [],
+            "regist_start": _fmt_iso(item.get("StartDate")),
+            "regist_end": _fmt_iso(item.get("RegisterEndDate") or item.get("EndDate")),
+            "contest_start": _fmt_iso(item.get("StartDate")),
+            "contest_end": _fmt_iso(item.get("EndDate")),
+            "category": TYPE_MAP.get(item.get("DetailType", ""), item.get("DetailType", "")),
+            "level": "",
             "attachments": [],
         }
 
+    # ---- merge_detail ----
+
+    def merge_detail(self, item: dict, detail_fields: dict) -> dict:
+        """合并详情到列表项，列表已有值不覆盖。"""
+        # 列表有的不覆盖，只填列表缺失的
+        for key, val in detail_fields.items():
+            if not item.get(key) and val:
+                item[key] = val
+
+        # raw_text 合并
+        list_data = {}
+        try:
+            list_data = json.loads(item.get("raw_text", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            pass
+        item["raw_text"] = json.dumps(
+            {"list": list_data, "detail": json.dumps(detail_fields, ensure_ascii=False)},
+            ensure_ascii=False,
+        )
+        return item
+
+    # ---- 详情解析 ----
+
+    def parse_detail(self, data) -> dict:
+        """解析竞赛详情 JSON。"""
+        if isinstance(data, dict) and "_id" in data:
+            return self._parse_api_detail(data)
+        if isinstance(data, str):
+            if data.strip().startswith("{"):
+                return self._parse_api_detail(json.loads(data))
+            return self._parse_html_detail(data)
+        return self._empty_detail()
+
+    def _parse_api_detail(self, detail: dict) -> dict:
+        org = detail.get("Organization", {})
+        org_name = org.get("Name", "") if isinstance(org, dict) else ""
+
+        # Stages → 赛程信息
+        stages = detail.get("Stages", [])
+        stage_info = []
+        for s in (stages or []):
+            if isinstance(s, dict):
+                stage_info.append({
+                    "name": s.get("Name", ""),
+                    "start": s.get("StartDate", ""),
+                    "end": s.get("EndDate", ""),
+                })
+
+        # 从 Tabs 提取正文（Markdown 格式）
+        tabs = detail.get("Tabs", [])
+        tab_texts = []
+        for tab in (tabs or []):
+            if isinstance(tab, dict):
+                title = tab.get("Title", "")
+                content = tab.get("Content", "")
+                if title and content:
+                    tab_texts.append(f"## {title}\n{content}")
+        description = "\n\n".join(tab_texts) if tab_texts else (detail.get("ShortDescription") or "")
+
+        return {
+            "description": description,
+            "organizer": org_name,
+            "organizer_list": [org_name] if org_name else [],
+            "co_organizers": [],
+            "supporters": [],
+            "regist_start": _fmt_iso(detail.get("StartDate")),
+            "regist_end": _fmt_iso(detail.get("RegisterEndDate") or detail.get("EndDate")),
+            "contest_start": _fmt_iso(detail.get("StartDate")),
+            "contest_end": _fmt_iso(detail.get("EndDate")),
+            "category": TYPE_MAP.get(detail.get("DetailType", ""), detail.get("DetailType", "")),
+            "level": "",
+            "attachments": [],
+            "display_label": detail.get("DisplayLabel", ""),
+            "max_members": detail.get("MaxMembersPerTeam", 0),
+            "users_number": detail.get("UsersNumber", 0),
+            "teams_number": detail.get("TeamsNumber", 0),
+            "stages": stage_info,
+            "raw_detail": json.dumps(detail, ensure_ascii=False),
+        }
+
+    # ---- HTML 备用 ----
+
     def _parse_html_list(self, html: str) -> list[dict]:
-        """从 HTML 页面提取竞赛链接。"""
         soup = BeautifulSoup(html, "lxml")
         results = []
-
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
             if "/competition/" not in href:
@@ -72,51 +173,23 @@ class HeywhaleParser(BaseParser):
             title = a_tag.get_text(strip=True)
             if not title or len(title) < 3:
                 continue
-
-            if not href.startswith("http"):
-                href = DETAIL_BASE + href
-
             results.append({
                 "title": title,
-                "url": href,
+                "url": href if href.startswith("http") else f"{DETAIL_BASE}{href}",
                 "source": "heywhale",
                 "raw_text": title,
                 "publish_date": "",
                 "collected_at": datetime.now().isoformat(),
                 "description": "",
                 "organizer": "",
-                "regist_start": "",
-                "regist_end": "",
-                "contest_start": "",
-                "contest_end": "",
-                "category": "",
-                "level": "",
+                "organizer_list": [],
+                "co_organizers": [], "supporters": [],
+                "regist_start": "", "regist_end": "",
+                "contest_start": "", "contest_end": "",
+                "category": "", "level": "",
                 "attachments": [],
             })
         return results
-
-    def parse_detail(self, data) -> dict:
-        """解析详情。"""
-        if isinstance(data, dict):
-            return self._parse_json_detail(data)
-        if isinstance(data, str) and data.strip().startswith("{"):
-            return self._parse_json_detail(json.loads(data))
-        return self._parse_html_detail(data) if isinstance(data, str) else {}
-
-    def _parse_json_detail(self, detail: dict) -> dict:
-        content = detail.get("content") or detail.get("description") or ""
-        return {
-            "description": _html_to_text(content) if isinstance(content, str) else json.dumps(content, ensure_ascii=False),
-            "organizer": detail.get("organizer") or "",
-            "regist_start": detail.get("sign_up_start") or detail.get("regist_start_time") or "",
-            "regist_end": detail.get("sign_up_end") or detail.get("regist_end_time") or detail.get("deadline") or "",
-            "contest_start": detail.get("start_time") or "",
-            "contest_end": detail.get("end_time") or "",
-            "category": detail.get("category") or "",
-            "level": detail.get("level") or "",
-            "attachments": detail.get("attachments") or [],
-            "raw_detail": json.dumps(detail, ensure_ascii=False),
-        }
 
     def _parse_html_detail(self, html: str) -> dict:
         soup = BeautifulSoup(html, "lxml")
@@ -124,21 +197,30 @@ class HeywhaleParser(BaseParser):
         return {
             "description": body.get_text(separator="\n", strip=True),
             "organizer": "",
-            "regist_start": "",
-            "regist_end": "",
-            "contest_start": "",
-            "contest_end": "",
-            "category": "",
-            "level": "",
-            "attachments": [],
+            "organizer_list": [], "co_organizers": [], "supporters": [],
+            "regist_start": "", "regist_end": "",
+            "contest_start": "", "contest_end": "",
+            "category": "", "level": "", "attachments": [],
+        }
+
+    @staticmethod
+    def _empty_detail() -> dict:
+        return {
+            "description": "", "organizer": "", "organizer_list": [],
+            "co_organizers": [], "supporters": [],
+            "regist_start": "", "regist_end": "",
+            "contest_start": "", "contest_end": "",
+            "category": "", "level": "", "attachments": [],
         }
 
 
-def _html_to_text(html: str) -> str:
-    if not html:
+def _fmt_iso(val) -> str:
+    if not val:
         return ""
-    soup = BeautifulSoup(html, "lxml")
-    return soup.get_text(separator="\n", strip=True)
+    s = str(val)
+    if "T" in s:
+        return s.split("T")[0]
+    return s[:10] if len(s) >= 10 else s
 
 
 # ---- 自注册 ----
