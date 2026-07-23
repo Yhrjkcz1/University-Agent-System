@@ -2285,7 +2285,7 @@ generic_schedule:
 # ------------------------------------------------------------
 
 generic_personal_resume:
-  name: "通用-竞赛报名个人简历"
+  name: "竞赛报名个人简历"
   material_type: "generic_personal_resume"
   description: "用于各类竞赛报名的个人简历模板，含基本信息、教育背景、技能特长、竞赛经历等"
   category: "通用模板"

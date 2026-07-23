@@ -505,8 +505,12 @@ class MaterialAgent:
     def _check_missing_fields(self, project_info: dict, material_type: str,
                                user_profile: dict) -> dict:
         """汇总缺失字段，全部可选，用户自主决定提供哪些。"""
-        if "checklist" in material_type or material_type in ("generic_budget",
-                "generic_team_description", "generic_schedule"):
+        if "checklist" in material_type or material_type in (
+            "generic_budget",
+            "generic_team_description",
+            "generic_schedule",
+            "generic_personal_resume",
+        ):
             return {"need_input": False, "message": ""}
 
         missing = []
