@@ -930,19 +930,18 @@ If no agent is needed, selected_agents must be empty.
             return payload
 
         data_source = str(payload.get("data_source", "")).lower()
-        source_url = str(payload.get("source_url", "")).lower()
         sources = []
 
-        if data_source in {"web", "mixed"} and (
-            not source_url or "saikr.com" in source_url
-        ):
-            sources.append("saikr")
+        # 网页采集：默认爬取所有已注册的 web 数据源
+        if data_source in {"web", "mixed", ""}:
+            from .info_collect.registry import SourceRegistry
+            sources = SourceRegistry.list_all()
         if data_source in {"upload", "mixed"} and payload.get("file_paths"):
             sources.append("local_file")
 
         if sources:
             payload["sources"] = sources
-        if "saikr" in sources and not payload.get("keywords"):
+        if not payload.get("keywords"):
             interests = original_input.get("user_profile", {}).get("interests", [])
             payload["keywords"] = interests or [str(original_input.get("user_input", ""))]
         return payload
