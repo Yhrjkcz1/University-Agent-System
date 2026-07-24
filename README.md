@@ -89,9 +89,19 @@ Copy-Item .env.example .env
 ```env
 DEEPSEEK_API_KEY=your_deepseek_api_key
 DEEPSEEK_MODEL=deepseek-chat
+
+# Supabase 云存储
+SUPABASE_URL=your_supabase_url
+SUPABASE_ANON_KEY=your_supabase_anon_key
+# 数据库密码，用于首次运行时自动建表
+SUPABASE_DB_PASSWORD=your_database_password
 ```
 
-不要把真实 API Key 写入源码、README 或 Git 提交。`.env` 已被 Git 忽略。
+> Supabase 配置是可选的。不填时信息采集结果仅在当前请求内存中使用，不会持久化；下次请求需重新爬取。
+>
+> 数据库密码在 Supabase Dashboard → Settings → Database → Connection string 中查看（替换 `[YOUR-PASSWORD]` 部分）。
+
+不要把真实 API Key、数据库密码写入源码、README 或 Git 提交。`.env` 已被 Git 忽略。
 
 ## 本地运行
 
@@ -150,6 +160,9 @@ python -m pytest -q -p no:cacheprovider
    ```toml
    DEEPSEEK_API_KEY = "你的真实密钥"
    DEEPSEEK_MODEL = "deepseek-chat"
+   SUPABASE_URL = "你的 Supabase 项目 URL"
+   SUPABASE_ANON_KEY = "你的 Supabase 匿名密钥"
+   SUPABASE_DB_PASSWORD = "你的数据库密码"
    ```
 
 5. 保存后点击 Deploy 或 Reboot app。
@@ -158,12 +171,57 @@ python -m pytest -q -p no:cacheprovider
 
 ## 数据与生成文件
 
-- `data/raw`：采集到的原始竞赛数据和日志。
+- `data/raw`：JSON 模式下持久化的原始竞赛数据和日志。
 - `data/processed`：结构化处理结果。
 - `data/output`：MaterialAgent 生成的 `.docx` 文件。
 - `data/temp`：运行期临时文件。
 
-当前版本没有接入持久化竞赛数据库，竞赛数据主要在请求时从公开来源采集。Streamlit Community Cloud 等免费实例使用临时文件系统，重启或重新部署后，运行期数据和生成文件可能丢失；用户应在生成后及时下载 Word 文件。
+**Supabase 持久化存储**：配置 `SUPABASE_URL` + `SUPABASE_ANON_KEY` + `SUPABASE_DB_PASSWORD` 后，采集到的竞赛数据会写入云端 PostgreSQL 数据库。后续请求优先从数据库搜索已有数据，仅在数据不够或超过有效期（默认 24小时）时触发爬虫刷新。
+
+## Supabase 数据库表结构
+
+配置好 Supabase 后，首次启动会自动通过直连 PostgreSQL 创建以下两张表和一个索引（如果有限制无法自动建表，可以手动操作，将migration.sql的语句复制到 SQL Editor后运行即可）：
+
+**competitions** — 竞赛数据主表
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| id | BIGSERIAL | 主键 |
+| title | TEXT | 竞赛标题 |
+| url | TEXT | 竞赛页面链接 |
+| source | TEXT | 数据来源（saikr / 52jingsai / ali_tianchi 等） |
+| publish_date | TEXT | 发布日期 |
+| description | TEXT | 竞赛描述 |
+| organizer | TEXT | 主办方 |
+| organizer_list / co_organizers / supporters | JSONB | 主办 / 协办 / 支持单位列表 |
+| regist_start / regist_end | TEXT | 报名起止时间 |
+| contest_start / contest_end | TEXT | 比赛起止时间 |
+| category | TEXT | 分类 |
+| level | TEXT | 级别 |
+| attachments | JSONB | 附件列表 |
+| raw_text | TEXT | 原始文本全文 |
+| collected_at | TEXT | 采集时间（建有降序索引） |
+| updated_at | TEXT | 最后更新时间 |
+| **唯一约束** | | `(url, source)` — 同一来源同一链接不会重复存储 |
+
+**crawl_logs** — 爬取日志表
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| id | BIGSERIAL | 主键 |
+| task_id | TEXT | 任务 ID |
+| source | TEXT | 数据来源 |
+| pages_crawled | INTEGER | 爬取页数 |
+| items_found / items_new / items_updated | INTEGER | 统计字段 |
+| status | TEXT | running / completed / failed |
+| error_message | TEXT | 异常信息 |
+| started_at / finished_at | TEXT | 起止时间 |
+
+**索引**
+
+- `idx_competitions_collected_at` — `collected_at DESC`，加速按时间倒序搜索。
+
+如果用户未配置数据库密码，终端会输出完整的建表 SQL，复制到 Supabase SQL Editor 中手动执行即可。
 
 ## 已知限制
 
@@ -173,6 +231,7 @@ python -m pytest -q -p no:cacheprovider
 - 推荐质量依赖用户画像完整度；信息不足时系统会继续追问。
 - Word 材料是可编辑初稿，不保证直接满足所有学校或赛事的正式模板。
 - 免费云平台可能休眠，首次访问和首次 Agent 调用可能较慢。
+- 未配置 Supabase 时竞赛数据仅在内存中使用，重启或重新部署后丢失。
 
 ## 安全与隐私
 
