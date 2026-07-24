@@ -1,10 +1,10 @@
 """测试爬虫功能 — 独立运行，测试各数据源的 Client + Parser 联调。
 
 用法:
-    python test_crawler.py                     # 测试所有 5 个网站
-    python test_crawler.py saikr               # 只测试赛氪
-    python test_crawler.py saikr 52jingsai     # 测试指定网站
-    python test_crawler.py --dry-run           # 干跑（只验证注册和配置，不发请求）
+    python test_crawler.py                     # 全量爬取 5 个网站
+    python test_crawler.py saikr               # 只爬赛氪
+    python test_crawler.py --dry-run           # 干跑
+    python test_crawler.py --search "大学生数学竞赛"  # 语义搜索
 """
 
 import json
@@ -13,8 +13,9 @@ import os
 import logging
 from datetime import datetime
 
-# 每次 print 后立即刷新，避免在卡顿时看不到输出
+# 每次 print 后立即刷新
 _print = print
+
 def print(*args, **kwargs):
     kwargs.setdefault("flush", True)
     _print(*args, **kwargs)
@@ -26,13 +27,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("crawler_test")
 
-# 确保项目根目录在 sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
 from agents.info_collect.registry import SourceRegistry
 from agents.info_collect.storage import Storage
-from agents.info_collect.crawler import Crawler
+from agents.info_collect.crawler import Crawler, _extract_ident
 
 ALL_SOURCES = ["saikr", "52jingsai", "ali_tianchi", "heywhale", "datafountain"]
 
@@ -67,8 +67,6 @@ def test_registry():
 def test_parser_unit():
     """对各 parser 做单元检查（不发网络请求）。"""
     banner("2. Parser 单元检查")
-
-    # 模拟 JSON API 数据
     mock_json = {"data": {"list": [{"title": "测试竞赛", "url": "/test/1"}]}}
 
     for name in ALL_SOURCES:
@@ -87,7 +85,6 @@ def test_parser_unit():
 
 
 def _load_config():
-    """加载 config.yaml 作为基础配置，test_crawler 只覆盖 info_collect 部分。"""
     import yaml
     config_path = os.path.join(PROJECT_ROOT, "config", "config.yaml")
     cfg = {}
@@ -98,7 +95,7 @@ def _load_config():
 
 
 def test_crawler_dry_run(sources: list[str]):
-    """验证 Crawler 能正确识别并准备采集指定数据源（不发实际请求）。"""
+    """验证 Crawler 能正确调度各数据源。"""
     banner("3. Crawler 干跑（验证调度逻辑）")
 
     config = _load_config()
@@ -113,6 +110,7 @@ def test_crawler_dry_run(sources: list[str]):
 
     print(f"待采集数据源: {sources}")
     print(f"Crawler 配置: max_pages={crawler.max_pages}, delay={crawler.delay_min}-{crawler.delay_max}s")
+    print(f"  模式: 全量入库（不做关键词过滤）")
 
     for s in sources:
         spec = SourceRegistry.get(s)
@@ -121,14 +119,6 @@ def test_crawler_dry_run(sources: list[str]):
         else:
             print(f"  {s:20s} -> 未注册!")
 
-    # 检查 _match
-    assert crawler._match({"title": "人工智能创新大赛"}, ["人工智能"])
-    assert crawler._match({"contest_name": "全国数学建模"}, ["数学建模", "ACM"])
-    assert not crawler._match({"title": "生物学竞赛"}, ["数学", "物理"])
-    print("  >>> _match 关键字匹配逻辑正常")
-
-    # 检查 _extract_ident
-    from agents.info_collect.crawler import _extract_ident
     cases = [
         ("https://www.saikr.com/vse/58394", "58394"),
         ("https://www.52jingsai.com/article-23897-1.html", "article-23897-1"),
@@ -143,26 +133,15 @@ def test_crawler_dry_run(sources: list[str]):
     print(f"  >>> 干跑通过（{len(sources)} 个数据源）")
 
 
-def test_crawl_live(source: str, keywords: list[str] | None = None, timeout: int = 10):
-    """真实爬取单个数据源。timeout 默认 10 秒。"""
-    banner(f"4. 真实爬取: {source}")
-
-    # 各站点默认关键词（匹配常见的竞赛标题）
-    DEFAULT_KEYWORDS = {
-        "saikr": ["数学建模", "人工智能", "程序设计"],
-        "52jingsai": ["人工智能", "大数据", "算法"],
-        "ali_tianchi": ["算法", "AI", "大数据"],
-        "heywhale": ["数据", "竞赛", "AI"],
-        "datafountain": ["算法", "人工智能", "大数据"],
-    }
-    if keywords is None:
-        keywords = DEFAULT_KEYWORDS.get(source, ["竞赛", "大赛"])
+def test_crawl_live(source: str, timeout: int = 10):
+    """真实爬取单个数据源，全量入库。"""
+    banner(f"4. 真实爬取: {source} (全量入库)")
 
     config = _load_config()
     config.setdefault("info_collect", {}).update({
         "request_delay_min": 1,
         "request_delay_max": 3,
-        "max_pages": 10,
+        "max_pages": 2,
         "client_timeout": timeout,
     })
     config.setdefault("storage", {}).setdefault("raw_data_path", "./data/raw")
@@ -170,20 +149,19 @@ def test_crawl_live(source: str, keywords: list[str] | None = None, timeout: int
     storage = Storage.create(config)
     crawler = Crawler(config, storage)
     log_id = storage.start_crawl_log(f"test_{source}", source)
-    stats = {}  # 提前初始化
+    stats = {}
 
-    print(f"关键词: {keywords}")
     print(f"最大页数: {crawler.max_pages}")
-    print(f"开始爬取 {source} ...")
+    print(f"开始全量爬取 {source} (无关键词过滤) ...")
 
     try:
-        items, stats = crawler.crawl(keywords, [source], max_results=10, log_id=log_id)
+        items, stats = crawler.crawl([], [source], max_pages_per_source=crawler.max_pages, log_id=log_id)
         pages = stats.get("pages_crawled", 0)
         total = stats.get("items_found", 0)
         new = stats.get("items_new", 0)
         updated = stats.get("items_updated", 0)
 
-        print(f"\n结果: 爬取 {pages} 页, 匹配 {total} 条, 新增 {new} 条, 更新 {updated} 条")
+        print(f"\n结果: 爬取 {pages} 页, 入库 {total} 条, 新增 {new} 条, 更新 {updated} 条")
 
         if items:
             print(f"\n前 {min(3, len(items))} 条结果:")
@@ -195,22 +173,8 @@ def test_crawl_live(source: str, keywords: list[str] | None = None, timeout: int
                     print(f"     描述: {desc[:100]}...")
         elif pages == 0:
             print("  提示: 爬虫未获取到任何页面数据，可能是网络不通或页面结构变化")
-            print(f"  建议: 检查 {source} 网站是否能正常访问，或运行 --dry-run 验证注册表")
         else:
-            # 有页面数据但关键词没匹配上 → 展示可用标题帮用户选词
-            total = stats.get("total_parsed", 0)
-            print(f"  >>> 关键词 {keywords} 在 {pages} 页 / {total} 条中未匹配 <<<")
-            if pages < 10:
-                print(f"  注意: 该数据源仅返回 {pages} 页数据（不支持无限翻页），非配置问题")
-            available = stats.get("available_titles", [])
-            if available:
-                if len(available) > 10:
-                    print(f"  当前页面可用的标题 (共 {len(available)} 条，展示前 10 条):")
-                else:
-                    print(f"  当前页面可用的标题 ({len(available)} 条):")
-                for t in available[:10]:
-                    print(f"    - {t[:60]}")
-            print(f"  建议: 使用 --keywords 更换关键词，或用 --keywords '*' 查看全部")
+            print(f"  提示: {pages} 页全部入库完成，共 {total} 条")
 
         return items, stats
 
@@ -230,32 +194,55 @@ def test_crawl_live(source: str, keywords: list[str] | None = None, timeout: int
         )
 
 
+def test_semantic_search(query: str):
+    """语义搜索已有数据。"""
+    banner(f"5. 语义搜索: {query}")
+
+    config = _load_config()
+    storage = Storage.create(config)
+
+    if not hasattr(storage, "search_semantic"):
+        print("  当前存储后端不支持语义搜索（仅 Supabase 支持）")
+        return
+
+    results = storage.search_semantic(query, limit=10)
+
+    print(f"\n搜索结果: {len(results)} 条")
+    for i, item in enumerate(results, 1):
+        print(f"\n  {i}. [{item.get('source', '?')}] {item.get('title', '无标题')[:60]}")
+        print(f"     URL: {item.get('url', 'N/A')}")
+        print(f"     organizer: {item.get('organizer', '')[:50]}")
+        print(f"     category: {item.get('category', '')}")
+        print(f"     regist_end: {item.get('regist_end', '')}")
+        desc = item.get("description", "")
+        if desc:
+            print(f"     描述: {desc[:120]}...")
+
+
 def main():
-    # 解析 CLI 参数
     args = sys.argv[1:]
     dry_run = "--dry-run" in args
-    timeout = 10  # 默认 10 秒超时
-    keywords = None  # None 表示使用各站点的默认关键词
+    timeout = 10
+    search_query = None
 
     for i, a in enumerate(args):
         if a == "--timeout" and i + 1 < len(args):
             timeout = int(args[i + 1])
-        if a == "--keywords" and i + 1 < len(args):
-            raw = args[i + 1]
-            keywords = ["*"] if raw == "*" else raw.split(",")
+        if a == "--search" and i + 1 < len(args):
+            search_query = args[i + 1]
 
-    sources = [a for a in args if not a.startswith("--") and (a in ALL_SOURCES or a.endswith("jingsai"))]
-    # 过滤掉 --timeout, --keywords 后面的值
+    sources = [a for a in args if not a.startswith("--") and a in ALL_SOURCES]
+    # 过滤掉 --timeout, --search 后面的值
     flag_values = []
     for i, a in enumerate(args):
-        if a in ("--timeout", "--keywords") and i + 1 < len(args):
+        if a in ("--timeout", "--search") and i + 1 < len(args):
             flag_values.append(args[i + 1])
     sources = [a for a in sources if a not in flag_values]
 
-    if not sources:
+    if not sources and not search_query:
         sources = ALL_SOURCES.copy()
 
-    # 验证 sources
+    # 验证
     registered = SourceRegistry.list_all()
     invalid = [s for s in sources if s not in registered]
     if invalid:
@@ -264,27 +251,29 @@ def main():
         sys.exit(1)
 
     print(f"数据源: {sources}")
-    print(f"模式: {'干跑' if dry_run else '真实爬取'}")
+    print(f"模式: {'干跑' if dry_run else '真实爬取(全量入库)'}")
     print(f"超时: {timeout}s")
-    if keywords:
-        print(f"关键词: {keywords}")
 
     test_registry()
     test_parser_unit()
-    test_crawler_dry_run(sources)
 
     if not dry_run:
+        test_crawler_dry_run(sources)
+
+    if not dry_run and sources:
         for source in sources:
-            test_crawl_live(source, keywords=keywords, timeout=timeout)
+            test_crawl_live(source, timeout=timeout)
+
+    if search_query:
+        test_semantic_search(search_query)
 
     banner("测试完成")
-    print(f"测试的数据源: {', '.join(sources)}")
+    print(f"测试的数据源: {', '.join(sources) if sources else '(仅搜索)'}")
     print("用法:")
     print("  python test_crawler.py --dry-run                        # 干跑")
-    print("  python test_crawler.py saikr                           # 测试赛氪")
-    print("  python test_crawler.py 52jingsai --keywords 竞赛,英语  # 中文关键词")
-    print("  python test_crawler.py 52jingsai --keywords '*'        # 匹配全部")
-
+    print("  python test_crawler.py saikr                           # 全量爬赛氪")
+    print("  python test_crawler.py 52jingsai                       # 全量爬52jingsai")
+    print("  python test_crawler.py --search \"大学生数学竞赛\"      # 语义搜索")
 
 
 if __name__ == "__main__":

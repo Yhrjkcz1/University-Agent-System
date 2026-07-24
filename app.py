@@ -469,6 +469,7 @@ def new_chat_state() -> dict[str, Any]:
         "available_time_per_week": None,
         "team_preference": "",
         "last_acknowledgement": "",
+        "input_role": "",
         "dialogue_action": "",
         "response_mode": "",
         "recommendation_options": {},
@@ -1107,6 +1108,26 @@ def _enforce_profile_field_isolation(
     return _apply_soft_preference_effects(state, soft_targets)
 
 
+def _looks_like_complete_notification(text: str) -> bool:
+    """Require enough notice structure to distinguish pasted input from a short request."""
+    if not _looks_like_notification(text):
+        return False
+    structural_markers = [
+        "主办单位", "主办方", "参赛对象", "参赛资格", "申报材料",
+        "报名方式", "报名截止", "作品要求", "奖项设置",
+    ]
+    marker_count = sum(marker in text for marker in structural_markers)
+    has_date = bool(
+        re.search(
+            r"\d{4}年\d{1,2}月\d{1,2}日|\d{4}[-/]\d{1,2}[-/]\d{1,2}",
+            text,
+        )
+    )
+    return len(text) >= 80 or (
+        len(text) >= 50 and marker_count >= 2 and has_date
+    )
+
+
 def _update_chat_state(
     state: dict[str, Any],
     message: str,
@@ -1115,7 +1136,20 @@ def _update_chat_state(
     state = {**new_chat_state(), **(state or {})}
     previous_major = str(state.get("major") or "").strip()
     baseline = _profile_isolation_snapshot(state)
+    previous_intent = str(state.get("intent") or "").strip()
     text = clean_text(message)
+    is_notification = _looks_like_complete_notification(text)
+    protected_profile = {
+        key: state.get(key)
+        for key in [
+            "major", "grade", "interests", "skills", "skills_skipped", "skill_gaps",
+            "competition_type", "competition_type_confirmed", "competition_scope",
+            "excluded_competition_types", "competition_level",
+            "competition_level_confirmed", "preferred_levels", "acceptable_levels",
+            "excluded_levels", "development_goals", "available_time_per_week",
+            "team_preference", "last_result", "recommendation_options",
+        ]
+    }
     fact_text = _correction_value_text(text)
     soft_targets = _resolve_soft_preference_targets(fact_text, state)
     state["turns"] = [*state.get("turns", []), text][-8:]
@@ -1266,7 +1300,7 @@ def _update_chat_state(
         elif any(phrase in fact_text for phrase in ["团队赛", "组队参加", "想组队", "有团队"]):
             state["team_preference"] = "团队赛"
 
-    if len(text) >= 80 and _looks_like_notification(text):
+    if is_notification:
         state["notification_text"] = text
 
     if "项目名称" in fact_text or "竞赛名称" in fact_text:
@@ -1277,6 +1311,8 @@ def _update_chat_state(
     material_map = {
         "报名简历": "generic_personal_resume", "个人简历": "generic_personal_resume",
         "简历": "generic_personal_resume", "报名表": "generic_application_form",
+        "项目申报书": "generic_application_form", "申报书": "generic_application_form",
+        "申报表": "generic_application_form",
         "计划书": "innovation_contest_business_plan",
         "PPT": "generic_ppt", "进度表": "generic_schedule", "清单": "challenge_cup_grand_checklist",
     }
@@ -1290,6 +1326,15 @@ def _update_chat_state(
 
     state = _enforce_profile_field_isolation(state, baseline, fact_text, soft_targets)
 
+    if is_notification:
+        state.update(protected_profile)
+        state["input_role"] = "competition_notice"
+        state["notification_text"] = text
+        if previous_intent:
+            state["intent"] = previous_intent
+        state["dialogue_action"] = "continue"
+        state["response_mode"] = "run_agent"
+        state["last_acknowledgement"] = "明白了，我会把这段内容作为竞赛通知处理，不会用它改动你的个人信息。"
     current_major = str(state.get("major") or "").strip()
     if previous_major and current_major and previous_major != current_major:
         state = _reset_profile_dependent_state(state, current_major)
@@ -1328,6 +1373,13 @@ def _apply_turn_understanding(
     """
     restrict_soft = soft_targets is not None
     allowed_soft = soft_targets or set()
+    input_role = str(understanding.get("input_role") or "").strip()
+    if input_role in {
+        "user_profile", "competition_notice", "project_description",
+        "command", "followup", "chat",
+    }:
+        state["input_role"] = input_role
+
     allowed_intents = {"collect", "extract", "recommendation", "material", "full_process"}
     intent = str(understanding.get("intent") or "").strip()
     if intent in allowed_intents and not state.get("intent"):
@@ -1553,7 +1605,23 @@ def _next_chat_question(state: dict[str, Any]) -> str | None:
             return "我记住你的年级了。再告诉我所学专业就可以，例如计算机、软件工程或工商管理。"
         if not state.get("grade"):
             return "专业方向了解了。你目前读大几，或者是在研究生阶段？我会据此判断参赛资格。"
+    if state["intent"] == "material":
+        recommendations = _recommendations_from_chat_state(state)
+        if (
+            not state.get("notification_text")
+            and not state.get("project_name")
+            and not recommendations
+        ):
+            return (
+                "基本情况已经记下了。接下来请把这次项目申报的完整通知或申报要求粘贴给我，"
+                "内容较长也没关系。我会先提取申报对象、赛道、时间和材料要求，再根据通知生成申报书。"
+            )
     if state["intent"] in {"recommendation", "full_process"}:
+        if state.get("competition_scope") and not state.get("competition_type_confirmed"):
+            return (
+                "范围我已经清楚了。你具体更想尝试什么主题？"
+                "例如人工智能、算法、数学建模、金融科技或创新创业；如果主题不限，也可以直接告诉我。"
+            )
         if not state.get("competition_type_confirmed") and not state.get("competition_level_confirmed"):
             major = state.get("major") or "你目前的专业"
             return (
@@ -1572,9 +1640,6 @@ def _next_chat_question(state: dict[str, Any]) -> str | None:
                 "不一定是编程技能，按真实情况简单说就行；没什么擅长的也可以直接说。"
             )
     if state["intent"] in {"material", "full_process"}:
-        has_previous = bool(state.get("last_result"))
-        if not state.get("notification_text") and not state.get("project_name") and not has_previous:
-            return "可以。把竞赛通知贴给我，或者直接告诉我项目名称，我就能接着帮你准备材料。"
         recommendations = _recommendations_from_chat_state(state)
         if not state.get("project_name") and len(recommendations) > 1:
             choices = "；".join(
@@ -1612,6 +1677,11 @@ def _chat_standard_input(state: dict[str, Any], message: str) -> dict:
         payload.update({"data_source": "upload", "notification_text": notification})
     else:
         payload.update({"data_source": "web", "source_url": "https://www.saikr.com/"})
+    # 从用户消息中提取数量（"11条"、"5个比赛"等），未指定时走 config 默认值
+    import re
+    count_match = re.search(r"(\d+)\s*(?:条|个|场|项|份)", message)
+    if count_match:
+        payload["max_results"] = int(count_match.group(1))
 
     if state.get("competition_type"):
         payload["keywords"] = [state["competition_type"], state.get("competition_level", "")]
