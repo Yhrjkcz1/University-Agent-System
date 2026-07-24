@@ -38,3 +38,7 @@ CREATE TABLE IF NOT EXISTS crawl_logs (
     started_at    TEXT NOT NULL DEFAULT '',
     finished_at   TEXT
 );
+
+-- 性能索引：避免 ORDER BY collected_at 全表扫描导致 PgBouncer 超时
+CREATE INDEX IF NOT EXISTS idx_competitions_collected_at
+  ON competitions (collected_at DESC);
