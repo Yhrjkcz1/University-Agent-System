@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS crawl_logs (
     finished_at   TEXT
 );"""
 
+_INDEX_DDL = """\
+CREATE INDEX IF NOT EXISTS idx_competitions_collected_at
+  ON competitions (collected_at DESC);"""
+
 
 def _extract_project_ref(supabase_url: str) -> str | None:
     """Extract the Supabase project reference from a dashboard URL."""
@@ -95,36 +99,52 @@ class SupabaseStore:
         PgBouncer so DDL is supported).  Otherwise a clear message with the DDL
         is logged so the user can run it manually.
         """
+        needs_tables = False
         try:
             self.client.table("competitions").select("id", count="exact").limit(1).execute()
-            return  # tables already exist
         except Exception:
-            pass  # tables missing — try to create them
+            needs_tables = True
 
         password = os.getenv("SUPABASE_DB_PASSWORD", "").strip()
         if not password or password == "your_database_password_here":
-            logger.warning(
-                "competitions 表不存在。设置 SUPABASE_DB_PASSWORD 可自动建表，"
-                "或手动在 Supabase SQL Editor 中执行：\n%s\n%s",
-                _COMPETITIONS_DDL, _CRAWL_LOGS_DDL,
-            )
+            if needs_tables:
+                logger.warning(
+                    "competitions 表不存在。设置 SUPABASE_DB_PASSWORD 可自动建表，"
+                    "或手动在 Supabase SQL Editor 中执行：\n%s\n%s\n%s",
+                    _COMPETITIONS_DDL, _CRAWL_LOGS_DDL, _INDEX_DDL,
+                )
             return
 
-        try:
-            import psycopg2
-            dsn = _build_pg_dsn(supabase_url, password)
-            conn = psycopg2.connect(dsn)
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute(_COMPETITIONS_DDL)
-                cur.execute(_CRAWL_LOGS_DDL)
-            conn.close()
-            logger.info("Supabase 表已自动创建：competitions, crawl_logs")
-        except Exception as exc:
-            logger.warning(
-                "自动建表失败 (%s)。请在 Supabase SQL Editor 中执行：\n%s\n%s",
-                exc, _COMPETITIONS_DDL, _CRAWL_LOGS_DDL,
-            )
+        if needs_tables:
+            try:
+                import psycopg2
+                dsn = _build_pg_dsn(supabase_url, password)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute(_COMPETITIONS_DDL)
+                    cur.execute(_CRAWL_LOGS_DDL)
+                    cur.execute(_INDEX_DDL)
+                conn.close()
+                logger.info("Supabase 表 + 索引已自动创建")
+            except Exception as exc:
+                logger.warning(
+                    "自动建表失败 (%s)。请在 Supabase SQL Editor 中执行：\n%s\n%s\n%s",
+                    exc, _COMPETITIONS_DDL, _CRAWL_LOGS_DDL, _INDEX_DDL,
+                )
+        else:
+            # 表存在 → 确保索引也在
+            try:
+                import psycopg2
+                dsn = _build_pg_dsn(supabase_url, password)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute(_INDEX_DDL)
+                conn.close()
+                logger.info("索引已就绪: idx_competitions_collected_at")
+            except Exception as exc:
+                logger.debug("索引创建跳过 (%s), 可手动: %s", exc, _INDEX_DDL)
 
     # ---- 竞赛数据 CRUD ----
 
@@ -173,8 +193,12 @@ class SupabaseStore:
             logger.info("Supabase 更新成功: %s", item.get("title", "")[:40])
 
     def get_all_items(self, source: Optional[str] = None) -> list[dict]:
-        """返回所有竞赛记录，可按来源过滤。"""
-        query = self.client.table("competitions").select("*").order("collected_at", desc=True)
+        """返回所有竞赛记录，可按来源过滤。
+
+        目前数据量 200+ 条，一次查询足够。Supabase REST API 单次
+        上限 1000 行，未来超过时需改为分页拉取。
+        """
+        query = self.client.table("competitions").select("*").order("collected_at", desc=True).limit(2000)
         if source:
             query = query.eq("source", source)
         result = query.execute()
@@ -205,6 +229,198 @@ class SupabaseStore:
             .eq("id", log_id)
             .execute()
         )
+
+    # ---- RAG 语义搜索（LLM → sentence-transformers → TF-IDF 三层 fallback） ----
+
+    def search_semantic(
+        self,
+        user_intent: str,
+        limit: int = 20,
+        category: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> list[dict]:
+        """LLM 语义匹配 + 三层 fallback。
+
+        1. DeepSeek API 批量打分（最准）
+        2. sentence-transformers 本地 embedding（离线可用）
+        3. TF-IDF 纯 Python 分词（零依赖兜底）
+        """
+        if not user_intent or not user_intent.strip():
+            return self.get_all_items(source=source)[:limit]
+
+        candidates = self._get_candidates(category=category, source=source)
+        if not candidates:
+            return []
+
+        logger.info("语义搜索: '%s', 候选 %d 条", user_intent[:60], len(candidates))
+
+        # 尝试 LLM 打分
+        scores = self._try_llm_rank(candidates, user_intent)
+        if scores is not None:
+            return self._top_ranked(candidates, scores, limit)
+
+        # 尝试本地 embedding
+        scores = self._try_local_embedding(candidates, user_intent)
+        if scores is not None:
+            return self._top_ranked(candidates, scores, limit)
+
+        # TF-IDF 兜底
+        scores = self._tfidf_rank(candidates, user_intent)
+        return self._top_ranked(candidates, scores, limit)
+
+    def _get_candidates(
+        self,
+        category: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> list[dict]:
+        """获取候选竞赛列表，可按分类/来源粗筛。"""
+        q = self.client.table("competitions").select("*")
+        if category:
+            q = q.eq("category", category)
+        if source:
+            q = q.eq("source", source)
+        result = q.execute()
+        return result.data if result.data else []
+
+    def _try_llm_rank(self, candidates: list[dict], user_intent: str) -> Optional[list[float]]:
+        """用 DeepSeek API 批量打分，失败返回 None。"""
+        import os
+        import json as _json
+
+        try:
+            from openai import OpenAI
+        except ImportError:
+            return None
+
+        api_key = os.getenv("DEEPSEEK_API_KEY", "")
+        if not api_key:
+            return None
+
+        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        client = OpenAI(api_key=api_key, base_url=base_url)
+
+        # 每批 30 条
+        BATCH = 30
+        all_scores: dict[int, float] = {}
+
+        for batch_start in range(0, len(candidates), BATCH):
+            batch = candidates[batch_start:batch_start + BATCH]
+            lines = []
+            for i, item in enumerate(batch):
+                desc = (item.get("description") or "")[:120].replace("\n", " ")
+                lines.append(f"{batch_start + i + 1}. {item['title'][:80]} | {desc}")
+
+            prompt = (
+                "你是一个大学生竞赛匹配专家。用户想要找：\"" + user_intent + "\"\n\n"
+                "以下是候选竞赛列表，请对每条竞赛与用户需求的相关性打分(0-100分)。\n"
+                "只输出 JSON 数组，不要解释：\n"
+                "[{\"i\": 编号, \"s\": 分数}, ...]\n\n"
+                + "\n".join(lines)
+            )
+
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    max_tokens=800,
+                    timeout=25,
+                )
+                text = resp.choices[0].message.content
+                # 从输出中提取 JSON
+                import re
+                match = re.search(r"\[.*\]", text, re.DOTALL)
+                if match:
+                    results = _json.loads(match.group(0))
+                    for r in results:
+                        idx = int(r.get("i", r.get("index", 0))) - 1
+                        score = float(r.get("s", r.get("score", 0)))
+                        all_scores[idx] = score
+            except Exception as e:
+                logger.warning("LLM 打分失败 (batch %d): %s", batch_start // BATCH, e)
+                return None
+
+        if not all_scores:
+            return None
+
+        scores = [all_scores.get(i, 0.0) for i in range(len(candidates))]
+        logger.info("LLM 打分完成: %d/%d 条有分数", len(all_scores), len(candidates))
+        return scores
+
+    def _try_local_embedding(self, candidates: list[dict], user_intent: str) -> Optional[list[float]]:
+        """sentence-transformers 本地 embedding + 余弦相似度。"""
+        try:
+            from sentence_transformers import SentenceTransformer
+            import numpy as np
+        except ImportError:
+            return None
+
+        try:
+            model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+            texts = [
+                (c["title"] or "") + " " + (c.get("description") or "")[:200]
+                for c in candidates
+            ]
+            intent_emb = model.encode([user_intent])[0]
+            doc_embs = model.encode(texts)
+
+            # cosine similarity
+            scores = []
+            for emb in doc_embs:
+                sim = np.dot(intent_emb, emb) / (np.linalg.norm(intent_emb) * np.linalg.norm(emb) + 1e-9)
+                scores.append(float(sim * 100))
+            logger.info("本地 embedding 打分完成: %d 条", len(scores))
+            return scores
+        except Exception as e:
+            logger.warning("本地 embedding 失败: %s", e)
+            return None
+
+    def _tfidf_rank(self, candidates: list[dict], user_intent: str) -> list[float]:
+        """纯 Python TF-IDF，零依赖兜底。"""
+        import math
+        import re as _re
+
+        def tokenize(text: str) -> list[str]:
+            # 中英文混合分词
+            text = text.lower()
+            # 保留中文连续字符、英文单词、数字
+            tokens = _re.findall(r"[一-鿿]+|[a-zA-Z]+|\d+", text)
+            return [t for t in tokens if len(t) > 1]
+
+        docs = []
+        for c in candidates:
+            text = (c["title"] or "") + " " + (c.get("description") or "")[:300]
+            docs.append(tokenize(text))
+        query_tokens = tokenize(user_intent)
+
+        # TF-IDF
+        N = len(docs)
+        idf = {}
+        for token in set(query_tokens):
+            df = sum(1 for d in docs if token in d)
+            idf[token] = math.log((N + 1) / (df + 1)) + 1
+
+        scores = []
+        for d in docs:
+            score = 0.0
+            for token in set(query_tokens):
+                if token in d:
+                    tf = d.count(token) / max(len(d), 1)
+                    score += tf * idf.get(token, 0)
+            scores.append(score * 100)
+
+        logger.info("TF-IDF 打分完成: %d 条", len(scores))
+        return scores
+
+    @staticmethod
+    def _top_ranked(candidates: list[dict], scores: list[float], limit: int) -> list[dict]:
+        """按分数排序返回 top-N（limit=0 返回全部）。"""
+        indexed = list(enumerate(scores))
+        indexed.sort(key=lambda x: x[1], reverse=True)
+        if limit and limit > 0:
+            return [candidates[i] for i, _ in indexed[:limit]]
+        return [candidates[i] for i, _ in indexed]
 
     # ---- RAG 全文搜索 ----
 

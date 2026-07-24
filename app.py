@@ -1078,6 +1078,11 @@ def _chat_standard_input(state: dict[str, Any], message: str) -> dict:
         payload.update({"data_source": "upload", "notification_text": notification})
     else:
         payload.update({"data_source": "web", "source_url": "https://www.saikr.com/"})
+    # 从用户消息中提取数量（"11条"、"5个比赛"等），未指定时走 config 默认值
+    import re
+    count_match = re.search(r"(\d+)\s*(?:条|个|场|项|份)", message)
+    if count_match:
+        payload["max_results"] = int(count_match.group(1))
 
     if state.get("competition_type"):
         payload["keywords"] = [state["competition_type"], state.get("competition_level", "")]
