@@ -920,9 +920,12 @@ If no agent is needed, selected_agents must be empty.
 
         if sources:
             payload["sources"] = sources
-        if not payload.get("keywords"):
-            interests = original_input.get("user_profile", {}).get("interests", [])
-            payload["keywords"] = interests or [str(original_input.get("user_input", ""))]
+        # keywords 按用户输入为准，不自动填充
+        # 空 keywords 在 Crawler._match() 中会匹配全部条目
+        if "keywords" not in payload:
+            user_input = str(original_input.get("user_input", "")).strip()
+            if user_input and user_input not in ("都可以", "随便", "不限", "", "全部", "所有"):
+                payload["keywords"] = [user_input]
         return payload
 
     def _adapt_info_extract_input(

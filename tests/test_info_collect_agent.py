@@ -86,7 +86,8 @@ def test_main_agent_adapts_saikr_web_input():
     from agents.info_collect.registry import SourceRegistry
     all_sources = SourceRegistry.list_all()
     assert sorted(adapted["sources"]) == sorted(all_sources)
-    assert adapted["keywords"] == ["人工智能"]
+    # keywords 按用户输入为准，不自动填充
+    assert adapted["keywords"] == []
 
 
 def test_main_agent_does_not_mislabel_unknown_websites():
