@@ -1,6 +1,6 @@
 """
-InfoExtractAgent — 信息抽取 Agent
-===================================
+InfoExtractAgent -- 信息抽取 Agent
+-----------------------------------
 负责将非结构化通知文本（竞赛/科研项目）转换为结构化 JSON 数据。
 
 规范遵循：PROJECT_SPEC_CN.md §12.2
@@ -76,6 +76,8 @@ class InfoExtractAgent:
         self.prompt_config = self._load_prompt_config()
         self.system_prompt = self.prompt_config.get("system", "")
         self.user_template = self.prompt_config.get("user_template", "")
+        self.system_prompt_batch = self.prompt_config.get("system_batch", self.system_prompt)
+        self.user_template_batch = self.prompt_config.get("user_template_batch", "")
         self.output_schema = self.prompt_config.get("output_schema", {})
 
         self._openai_available = False
@@ -272,77 +274,63 @@ class InfoExtractAgent:
     # ── 核心业务逻辑 ─────────────────────────────────────
 
     def process(self, input_data: dict) -> dict:
-        """
-        对每条通知文本调用 LLM 抽取结构化信息。
+        """批量优先 + 降级兜底：先用一次 LLM 调用抽取全部通知。
 
-        Args:
-            input_data: 统一输入格式
-
-        Returns:
-            {"structured_items": [...]}
+        流程：
+        1. 批量调用 LLM 一次性抽取所有 raw_items
+        2. validate 批量返回的每条结果，标记成功/失败
+        3. 批量中缺失/无效的条目 → 单独逐条补抽
+        4. 批量完全失败（网络/限流/解析失败）→ 全部降级逐条
         """
         inner = input_data.get("input_data", {})
         raw_items = inner.get("raw_items", [])
-
-        structured_items = []
         total = len(raw_items)
 
-        for i, raw_item in enumerate(raw_items):
+        # ── 第一步：批量抽取 ──
+        batch_results, batch_ok = self._call_llm_batch_extract(raw_items)
+        structured_items: list = [None] * total
+        retry_indices: list[int] = []
+
+        if batch_ok and batch_results is not None:
+            for i, extracted in enumerate(batch_results):
+                if isinstance(extracted, dict):
+                    try:
+                        structured_items[i] = self._finalize_item(
+                            extracted, raw_items[i]
+                        )
+                    except Exception:
+                        retry_indices.append(i)
+                else:
+                    retry_indices.append(i)
+        else:
+            # 批量完全失败 → 全部降级逐条
+            retry_indices = list(range(total))
+
+        # ── 第二步：逐条补抽失败/缺失的条目 ──
+        for i in retry_indices:
+            raw_item = raw_items[i]
             raw_text = raw_item.get("raw_text", "")
             source_url = raw_item.get("url", raw_item.get("source_url", ""))
-
             try:
-                print(f"[抽取] ({i+1}/{total}) {raw_item.get('title','')[:50]} ...")
+                print(
+                    f"[逐条补抽] ({i+1}/{total}) {raw_item.get('title','')[:50]} ..."
+                )
                 extracted = self._call_llm_extract(raw_text, source_url)
-                validated = self._validate_and_fix(extracted)
-                validated = self._apply_source_fallbacks(validated, raw_item)
-                if not validated.get("source_url") or validated["source_url"] == "unknown":
-                    validated["source_url"] = source_url
-                validated["_extract_status"] = "success"
-                validated["_source_title"] = raw_item.get("title", "")
-                validated["_source"] = raw_item.get("source", "")
-                validated["_collected_at"] = raw_item.get("collected_at", "")
-                structured_items.append(validated)
+                structured_items[i] = self._finalize_item(extracted, raw_item)
             except KeyboardInterrupt:
-                print(f"\n[中断] 用户取消，已保存前 {i} 条结果。")
-                # 把剩余未处理的标记为 skipped
-                for remaining in raw_items[i:]:
-                    structured_items.append({
-                        "title": remaining.get("title", "unknown"),
-                        "type": "其他",
-                        "deadline": "unknown",
-                        "registration_time": "unknown",
-                        "requirements": dict(self.FIELD_DEFAULTS["requirements"]),
-                        "reward": "unknown",
-                        "organizer": "unknown",
-                        "source_url": remaining.get("url", ""),
-                        "summary": "unknown",
-                        "_extract_status": "skipped",
-                        "_extract_error": "用户中断",
-                        "_source_title": remaining.get("title", ""),
-                        "_source": remaining.get("source", ""),
-                        "_collected_at": remaining.get("collected_at", ""),
-                    })
+                print(f"\n[中断] 用户取消，剩余 {total - i} 条标记为 skipped。")
+                for j in range(i, total):
+                    if structured_items[j] is None:
+                        structured_items[j] = self._build_fallback_item(
+                            raw_items[j], "用户中断"
+                        )
+                        structured_items[j]["_extract_status"] = "skipped"
                 break
             except Exception as e:
-                # 单条失败不中断整体流程
                 print(f"  [失败] {e}")
-                structured_items.append({
-                    "title": raw_item.get("title", "unknown"),
-                    "type": "其他",
-                    "deadline": "unknown",
-                    "registration_time": "unknown",
-                    "requirements": dict(self.FIELD_DEFAULTS["requirements"]),
-                    "reward": "unknown",
-                    "organizer": "unknown",
-                    "source_url": source_url,
-                    "summary": "unknown",
-                    "_extract_status": "failed",
-                    "_extract_error": str(e),
-                    "_source_title": raw_item.get("title", ""),
-                    "_source": raw_item.get("source", ""),
-                    "_collected_at": raw_item.get("collected_at", ""),
-                })
+                structured_items[i] = self._build_fallback_item(
+                    raw_item, str(e)
+                )
 
         return {"structured_items": structured_items}
 
@@ -386,7 +374,165 @@ class InfoExtractAgent:
         result["requirements"] = requirements
         return result
 
-    # ── LLM 调用 ─────────────────────────────────────────
+    # ── 批量抽取 ───────────────────────────────────────
+
+    def _build_batch_user_prompt(self, raw_items: list[dict]) -> str:
+        """将多条 raw_items 拼接为一个批量抽取 user prompt。"""
+        parts = []
+        for i, item in enumerate(raw_items, 1):
+            title = item.get("title", "") or "未知项目"
+            url = item.get("url", item.get("source_url", ""))
+            raw_text = item.get("raw_text", "")
+            parts.append(
+                f"--- 第{i}条 ---\n"
+                f"标题：{title}\n"
+                f"来源：{url}\n"
+                f"正文：\n{raw_text}\n"
+            )
+        items_text = "\n".join(parts)
+        return self.user_template_batch.format(items_text=items_text)
+
+    def _parse_llm_json_array(self, text: str) -> list | None:
+        """解析 LLM 返回的 JSON 数组，失败返回 None。"""
+        if not text or not text.strip():
+            return None
+        text = text.strip()
+
+        # 策略 1：直接解析数组
+        try:
+            result = json.loads(text)
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+        # 策略 2：```json [...] ```
+        match = re.search(r"```json\s*(\[[\s\S]*?\])\s*```", text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(1))
+                if isinstance(result, list):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # 策略 3：``` [...] ```
+        match = re.search(r"```\s*(\[[\s\S]*?\])\s*```", text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(1))
+                if isinstance(result, list):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # 策略 4：定位第一个 [ 到最后一个 ]
+        start = text.find("[")
+        end = text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            try:
+                result = json.loads(text[start:end + 1])
+                if isinstance(result, list):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # 策略 5：单引号 → 双引号
+        try:
+            candidate = text.replace("'", '"')
+            start = candidate.find("[")
+            end = candidate.rfind("]")
+            if start != -1 and end != -1 and end > start:
+                result = json.loads(candidate[start:end + 1])
+                if isinstance(result, list):
+                    return result
+        except json.JSONDecodeError:
+            pass
+
+        return None
+
+    def _call_llm_batch_extract(
+        self, raw_items: list[dict]
+    ) -> tuple:
+        """批量调用 LLM 一次性抽取所有通知。
+
+        Returns:
+            (list | None, ok: bool)
+            - ok=True：返回 list，长度与 raw_items 对齐
+            - ok=False：批量失败，调用方应降级逐条
+        """
+        if not self.system_prompt_batch or not self.user_template_batch:
+            return None, False
+
+        user_prompt = self._build_batch_user_prompt(raw_items)
+        messages = [
+            {"role": "system", "content": self.system_prompt_batch},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            total = len(raw_items)
+            batch_max_tokens = max(2048, 400 * total)
+            print(f"[批量抽取] 尝试一次抽取 {total} 条通知 ...")
+            response_text = self._call_api(messages, max_tokens=batch_max_tokens)
+            parsed = self._parse_llm_json_array(response_text)
+
+            if parsed is None or not isinstance(parsed, list):
+                print("  [批量] JSON 解析失败，将降级逐条重试")
+                return None, False
+
+            if len(parsed) < total:
+                print(
+                    f"  [批量] 返回 {len(parsed)} 条，期望 {total} 条，"
+                    f"缺 {total - len(parsed)} 条将逐条补抽"
+                )
+                parsed.extend([None] * (total - len(parsed)))
+
+            if len(parsed) > total:
+                parsed = parsed[:total]
+
+            success_n = sum(1 for p in parsed if p is not None)
+            print(f"  [批量] 成功返回 {success_n}/{total} 条有效结果")
+            return parsed, True
+
+        except Exception as e:
+            print(f"  [批量] API 调用失败: {e}，将降级逐条重试")
+            return None, False
+
+    def _finalize_item(self, extracted: dict, raw_item: dict) -> dict:
+        """对单条 LLM 抽取结果做 validate + fallback + 元数据标记。"""
+        source_url = raw_item.get("url", raw_item.get("source_url", ""))
+        validated = self._validate_and_fix(extracted)
+        validated = self._apply_source_fallbacks(validated, raw_item)
+        if not validated.get("source_url") or validated["source_url"] == "unknown":
+            validated["source_url"] = source_url
+        validated["_extract_status"] = "success"
+        validated["_source_title"] = raw_item.get("title", "")
+        validated["_source"] = raw_item.get("source", "")
+        validated["_collected_at"] = raw_item.get("collected_at", "")
+        return validated
+
+    def _build_fallback_item(self, raw_item: dict, error: str) -> dict:
+        """构造单条抽取失败时的占位条目。"""
+        source_url = raw_item.get("url", raw_item.get("source_url", ""))
+        return {
+            "title": raw_item.get("title", "unknown"),
+            "type": "其他",
+            "deadline": "unknown",
+            "registration_time": "unknown",
+            "requirements": dict(self.FIELD_DEFAULTS["requirements"]),
+            "reward": "unknown",
+            "organizer": "unknown",
+            "source_url": source_url,
+            "summary": "unknown",
+            "_extract_status": "failed",
+            "_extract_error": error,
+            "_source_title": raw_item.get("title", ""),
+            "_source": raw_item.get("source", ""),
+            "_collected_at": raw_item.get("collected_at", ""),
+        }
+
+    # ── 逐条抽取（保留，供批量降级时使用）───────────────
 
     def _call_llm_extract(self, raw_text: str, source_url: str) -> dict:
         """
@@ -415,7 +561,7 @@ class InfoExtractAgent:
         response_text = self._call_api(messages)
         return self._parse_llm_json(response_text)
 
-    def _call_api(self, messages: list) -> str:
+    def _call_api(self, messages: list, max_tokens: int = 0) -> str:
         """
         调用 OpenAI 兼容 API，未配置时回退到 Mock 模式。
         """
@@ -428,7 +574,7 @@ class InfoExtractAgent:
         base_url = api_config.get("base_url", "") or llm_config.get("base_url", "")
         model_name = model_config.get("name", "") or model_config.get("model", "")
         temperature = model_config.get("temperature", 0.3)
-        max_tokens = model_config.get("max_tokens", 2048)
+        resolved_max_tokens = max_tokens or model_config.get("max_tokens", 2048)
 
         # 如果没有 openai 库或 API 未配置，回退到 Mock
         if not self._openai_available:
@@ -452,7 +598,7 @@ class InfoExtractAgent:
                     model=model_name,
                     messages=messages,
                     temperature=temperature,
-                    max_tokens=max_tokens,
+                    max_tokens=resolved_max_tokens,
                     timeout=timeout,
                 )
                 print(f"  [API] 调用成功")
