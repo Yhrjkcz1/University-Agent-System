@@ -1,4 +1,4 @@
-﻿name: Deploy Frontend to GitHub Pages
+﻿name: Build Frontend
 
 on:
   push:
@@ -6,8 +6,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   build:
@@ -22,18 +20,5 @@ jobs:
           node-version: 20
       - run: npm install
       - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: ./frontend/dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - uses: actions/deploy-pages@v4
+        env:
+          VITE_API_BASE_URL: https://saizhitong-agent2.onrender.com
