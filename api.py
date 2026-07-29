@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -122,6 +123,110 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
+# 会话管理（内存级，按首次会话指纹索引）
+# ---------------------------------------------------------------------------
+
+
+class SessionStore:
+    """内存会话存储：用首次用户消息 + major 做稳定指纹。"""
+
+    def __init__(self):
+        self._sessions: dict[str, dict[str, Any]] = {}
+
+    def _fingerprint(self, req: AgentRunRequest) -> str:
+        """从请求中生成稳定的会话指纹（跨后续请求不变）。"""
+        history = req.history or []
+        first_user_msg = ""
+        for m in history:
+            if m.get("role") == "user":
+                first_user_msg = m.get("content", "")
+                break
+        if not first_user_msg:
+            first_user_msg = req.user_input or ""
+        profile = req.user_profile or {}
+        major = profile.get("major", "")
+        raw = f"{major}|{first_user_msg[:100]}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    def get_or_create(self, req: AgentRunRequest) -> dict[str, Any]:
+        """获取或创建会话上下文。"""
+        key = self._fingerprint(req)
+        if key not in self._sessions:
+            self._sessions[key] = {
+                "recommendation_pool": [],
+                "previous_result_data": None,
+                "conversation_state": {},
+            }
+        return self._sessions[key]
+
+    def store_result(self, req: AgentRunRequest, result_data: dict[str, Any], pool: list):
+        """保存推荐结果到会话。"""
+        key = self._fingerprint(req)
+        if key in self._sessions:
+            self._sessions[key]["recommendation_pool"] = pool
+            self._sessions[key]["previous_result_data"] = result_data
+
+
+session_store = SessionStore()
+
+
+# ---------------------------------------------------------------------------
+# 对话路由工具函数
+# ---------------------------------------------------------------------------
+
+
+def _is_more_recommendations_request(user_input: str) -> bool:
+    """判断用户是否在请求「更多推荐」。"""
+    if not user_input:
+        return False
+    text = user_input.strip()
+    # 匹配「还有其他推荐吗」「更多推荐」「换一批」「别的推荐」「再推荐一些」等常见表达
+    more_keywords = [
+        "其他", "更多", "换一批", "别的", "另外的", "再看看",
+        "还有", "再推荐", "其他推荐", "更多推荐", "其他项目",
+        "别的推荐", "其他比赛", "更多选项", "更多选择",
+    ]
+    return any(kw in text for kw in more_keywords)
+
+
+def _build_more_recommendations_response(
+    pool: list[dict[str, Any]],
+    already_shown: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """从候选池中取出未展示过的推荐，构造扩容回复。"""
+    if not pool:
+        return None
+    shown_titles = {
+        r.get("title", "") for r in already_shown if isinstance(r, dict)
+    }
+    # 从池中取未展示过的（跳过已展示的标题）
+    fresh: list[dict[str, Any]] = []
+    for item in pool:
+        if len(fresh) >= 3:
+            break
+        title = item.get("title", "")
+        if title and title not in shown_titles:
+            fresh.append(item)
+            shown_titles.add(title)
+    if not fresh:
+        # 没有新项目可推荐
+        return {
+            "text": "目前符合条件的竞赛候选都已经展示过了。你可以换个专业方向或调整筛选条件，我再帮你重新查找。",
+            "type": "agent",
+            "files": [],
+            "recommendations": [],
+        }
+    names = "、".join(r.get("title", "") for r in fresh)
+    text = f"除了前面推荐的，以下项目也值得关注：{names}。你可以继续问我其中某个竞赛的详情。"
+    return {
+        "text": text,
+        "type": "result",
+        "files": [],
+        "recommendations": fresh,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
 
@@ -134,7 +239,7 @@ def health_check() -> dict[str, str]:
 
 @app.post("/api/agent/run", response_model=AgentRunResponse)
 def run_agent(req: AgentRunRequest) -> AgentRunResponse:
-    """【核心接口】接收前端请求 → 调度 MainAgent → 返回结果文本。"""
+    """【核心接口】接收前端请求 → 对话路由 → 调度 MainAgent → 返回结果。"""
     try:
         # ---------------------------------------------------------------
         # [DIAG] 打印前端传来的完整请求
@@ -145,30 +250,57 @@ def run_agent(req: AgentRunRequest) -> AgentRunResponse:
         logger.info(f"  task_type:  {repr(req.task_type)}")
         logger.info(f"  user_profile (原始): {json.dumps(req.user_profile, ensure_ascii=False)}")
         logger.info(f"  context keys: {list(req.context.keys()) if req.context else 'empty'}")
-        logger.info(f"  input_data keys: {list(req.input_data.keys()) if req.input_data else 'empty'}")
         logger.info(f"  history turns: {len(req.history)}")
 
+        config = load_config()
+        agent = MainAgent(config=config)
+
         # ---------------------------------------------------------------
-        # 用户画像校验：full_process / recommendation 任务需要专业信息
+        # 用户输入预处理：获取稳定会话
+        # ---------------------------------------------------------------
+        session = session_store.get_or_create(req)
+        user_text = str(req.user_input or "").strip()
+
+        # ---------------------------------------------------------------
+        # Step A: 问候 / 致谢 / 越界 → handle_conversation_control()
+        # ---------------------------------------------------------------
+        cc_result = agent.handle_conversation_control(
+            user_text,
+            conversation_state=session.get("conversation_state"),
+        )
+        if cc_result is not None:
+            final_answer = (
+                cc_result.get("data", {}).get("final_answer")
+                or "你好，有什么可以帮你的？"
+            )
+            logger.info(f"  [路由] 对话控制处理 → {cc_result.get('metadata', {}).get('followup_type', 'unknown')}")
+            return AgentRunResponse(
+                success=True,
+                response={
+                    "text": final_answer,
+                    "type": "agent",
+                    "files": [],
+                    "recommendations": [],
+                },
+            )
+
+        # ---------------------------------------------------------------
+        # Step B: 用户画像校验 + 提取
         # ---------------------------------------------------------------
         profile = req.user_profile or {}
         major = str(profile.get("major") or "").strip()
-        grade = str(profile.get("grade") or "").strip()
 
         task_type = (req.task_type or "full_process").strip().lower()
         needs_profile = task_type in {"full_process", "recommend", "recommendation"}
 
-        # ---------------------------------------------------------------
-        # 用户画像增强：从 user_input 中补充缺失的字段
-        # ---------------------------------------------------------------
-        user_text = str(req.user_input or "").strip()
-
         if needs_profile and not major:
-            # 前端未传递专业信息，由后端自行从原始输入中提取
+            # 从前端传来的 user_input 中提取专业、兴趣、目标
             major_hint = _detect_major_in_text(user_text)
             if major_hint:
                 req.user_profile["major"] = major_hint
                 req.user_profile["grade"] = _detect_grade_in_text(user_text)
+                # 重新获取 session（major 变了，指纹会重新生成）
+                session = session_store.get_or_create(req)
             else:
                 return AgentRunResponse(
                     success=False,
@@ -187,7 +319,7 @@ def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                     },
                 )
 
-        # 即使 major 已存在，也检查 interests 和 goal 是否缺失，从 user_input 中补充
+        # 补充 interests 和 goal
         existing_interests = req.user_profile.get("interests", [])
         existing_goal = req.user_profile.get("goal", "")
         if not existing_interests:
@@ -201,8 +333,64 @@ def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                 req.user_profile["goal"] = extracted_goal
                 logger.info(f"  [画像增强] 从 user_input 提取 goal: {extracted_goal}")
 
-        config = load_config()
-        agent = MainAgent(config=config)
+        # ---------------------------------------------------------------
+        # Step C: 多轮对话路由 —— 检查是否是对上一轮结果的追问
+        # ---------------------------------------------------------------
+        previous_result_data = session.get("previous_result_data")
+        conversation_state = session.get("conversation_state", {})
+
+        # C1: 用户请求「更多推荐」
+        if _is_more_recommendations_request(user_text):
+            pool = session.get("recommendation_pool", [])
+            # 从 historical 中获取上一轮已展示的推荐
+            already_shown: list[dict[str, Any]] = []
+            if previous_result_data:
+                already_shown = previous_result_data.get("recommendations", [])
+            more_resp = _build_more_recommendations_response(pool, already_shown)
+            if more_resp is not None:
+                logger.info(f"  [路由] 扩容推荐响应 → 池大小: {len(pool)}, 已有: {len(already_shown)}")
+                return AgentRunResponse(
+                    success=True,
+                    response=more_resp,
+                )
+            # 没有池或扩容失败，走 normal pipeline
+            logger.info("  [路由] 请求更多推荐但候选池为空，回退到 normal pipeline")
+
+        # C2: 追问详情/对比 → handle_followup()
+        if previous_result_data is not None:
+            followup_result = agent.handle_followup(
+                user_text,
+                previous_result_data.get("_raw_agent_output", {})
+                if isinstance(previous_result_data, dict)
+                else {},
+                conversation_state=conversation_state,
+            )
+            if followup_result is not None:
+                final_answer = (
+                    followup_result.get("data", {}).get("final_answer")
+                    or followup_result.get("message", "")
+                )
+                followup_type = followup_result.get("metadata", {}).get("followup_type", "unknown")
+                logger.info(f"  [路由] 追问处理 → {followup_type}")
+                # 如果是详情请求，附带对应的推荐对象
+                detail_recs = []
+                if followup_type == "competition_detail":
+                    selected = followup_result.get("data", {}).get("selected_competition")
+                    if selected:
+                        detail_recs = [selected]
+                return AgentRunResponse(
+                    success=followup_result.get("status") in {"success", "partial"},
+                    response={
+                        "text": final_answer,
+                        "type": "agent",
+                        "files": [],
+                        "recommendations": detail_recs,
+                    },
+                )
+
+        # ---------------------------------------------------------------
+        # Step D: 运行正常推荐管线
+        # ---------------------------------------------------------------
         standard_input = build_minimal_input(
             user_input=req.user_input,
             task_type=req.task_type,
@@ -212,31 +400,29 @@ def run_agent(req: AgentRunRequest) -> AgentRunResponse:
             history=req.history,
         )
 
-        # ---------------------------------------------------------------
-        # [DIAG] 打印传入 MainAgent 的 standard_input
-        # ---------------------------------------------------------------
+        # 将历史对话注入 input_data，让 _build_final_answer 感知上下文
+        standard_input["history"] = req.history or []
+        standard_input["user_input"] = req.user_input or ""
+
         logger.info("[STEP 2] 构造的 standard_input 传给 MainAgent")
         logger.info(f"  user_input:     {repr(standard_input.get('user_input'))}")
         logger.info(f"  task_type:      {repr(standard_input.get('task_type'))}")
         logger.info(f"  user_profile:   {json.dumps(standard_input.get('user_profile'), ensure_ascii=False)}")
-        logger.info(f"  input_data keys: {list(standard_input.get('input_data', {}).keys())}")
+        logger.info(f"  history turns:  {len(standard_input.get('history', []))}")
 
-        # 特别检查 interests 字段是否存在
         up = standard_input.get("user_profile", {})
         interests = up.get("interests", [])
-        major = up.get("major", "")
+        major_found = up.get("major", "")
         goal = up.get("goal", "")
-        logger.info(f"  >>> 提取的画像: major={repr(major)}, interests={interests}, goal={repr(goal)}")
+        logger.info(f"  >>> 提取的画像: major={repr(major_found)}, interests={interests}, goal={repr(goal)}")
         if not interests:
             logger.warning("  *** WARNING: interests 仍为空! 兴趣分将全部为 0")
-        else:
-            logger.info(f"  >>> interests 已填充 {len(interests)} 个兴趣关键词 ✓")
-        if not goal:
-            logger.info("  >>> goal 未提取（可选项，不影响推荐）")
 
         result = agent.run(standard_input)
 
-        # 从 MainAgent 返回结果中提取可展示文本和推荐列表
+        # ---------------------------------------------------------------
+        # Step E: 提取结果并保存会话
+        # ---------------------------------------------------------------
         data = result.get("data", {})
         final_answer = (
             data.get("final_answer")
@@ -245,8 +431,9 @@ def run_agent(req: AgentRunRequest) -> AgentRunResponse:
         if not final_answer:
             final_answer = "智能体执行完毕，但没有生成可展示的结果。"
 
-        # 提取推荐列表（从任意子 agent 结果中获取）
+        # 提取推荐列表和推荐池（从子 agent 结果中获取）
         recommendations_list: list[dict[str, Any]] = []
+        recommendation_pool: list[dict[str, Any]] = []
         agent_results = data.get("agent_results", [])
         if isinstance(agent_results, list):
             for ar in agent_results:
@@ -254,18 +441,36 @@ def run_agent(req: AgentRunRequest) -> AgentRunResponse:
                 recs = ar_data.get("recommendations", [])
                 if isinstance(recs, list) and recs:
                     recommendations_list = recs
+                pool = ar_data.get("recommendation_pool", [])
+                if isinstance(pool, list) and pool:
+                    recommendation_pool = pool
+                if recommendations_list and recommendation_pool:
                     break
-        # 也检查根 data 层
         if not recommendations_list:
             recs = data.get("recommendations", [])
             if isinstance(recs, list) and recs:
                 recommendations_list = recs
+        if not recommendation_pool and recommendations_list:
+            recommendation_pool = recommendations_list[:]
 
-        # 确定 response type：
-        # - success → "agent"（正常显示）
-        # - partial + 有推荐 → "result"（显示推荐卡片）
-        # - partial + 无推荐 → "agent"（仅展示说明文字）
-        # - failed/need_input → "error" 或 "need_input"
+        # 保存到会话（供后续「更多推荐」/「详情」等追问复用）
+        previous_result_data_saved = {
+            "recommendations": recommendations_list,
+            "recommendation_pool": recommendation_pool,
+            "_raw_agent_output": result,
+        }
+        session_store.store_result(req, previous_result_data_saved, recommendation_pool)
+
+        # 更新会话中的 conversation_state（从 understand_conversation_turn 获取）
+        llm_state = agent.understand_conversation_turn(
+            req.user_input or "",
+            conversation_state=session.get("conversation_state", {}),
+        )
+        if llm_state and isinstance(llm_state, dict):
+            logger.info(f"  [LLM 理解] dialogue_action={llm_state.get('dialogue_action', 'unknown')}")
+            session["conversation_state"].update(llm_state)
+
+        # 确定 response type
         status = result.get("status", "failed")
         has_recs = bool(recommendations_list)
         if status == "partial":
@@ -288,6 +493,7 @@ def run_agent(req: AgentRunRequest) -> AgentRunResponse:
         )
 
     except Exception as exc:
+        logger.error(f"[错误] {exc}")
         return AgentRunResponse(
             success=False,
             response={

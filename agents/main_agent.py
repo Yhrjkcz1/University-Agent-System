@@ -757,7 +757,7 @@ class MainAgent:
             "agent_results": agent_results,
             "integrated_data": successful_data,
             "errors": errors,
-            "final_answer": self._build_final_answer(agent_results, planning),
+                        "final_answer": self._build_final_answer(agent_results, planning, input_data=input_data),
             "next_action": planning.get("suggested_next_action") or self._suggest_next_action(errors),
         }
 
@@ -1232,51 +1232,132 @@ If no agent is needed, selected_agents must be empty.
             or payload.get("raw_items")
         )
 
-    def _build_final_answer(self, agent_results: list[dict[str, Any]], planning: dict[str, Any] | None = None) -> str:
+    def _generate_conversational_answer(
+        self,
+        agent_results: list[dict[str, Any]],
+        planning: dict[str, Any] | None = None,
+        input_data: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Try to generate a final answer via LLM, using user_input & history for context.
+
+        Returns a string if successful, or None to fall back to deterministic templates.
+        """
         planning = planning or {}
-        if planning.get("need_user_input"):
-            missing = [
-                str(item).strip()
-                for item in planning.get("missing_information", [])
-                if str(item).strip()
-            ]
-            if missing:
-                return f"还缺少这些信息：{'、'.join(missing)}。补充后我就可以继续。"
-            return "当前任务还缺少明确输入，请告诉我具体要找的竞赛方向或要处理的材料。"
+        input_data = input_data or {}
+        if not self._is_llm_enabled():
+            return None
 
-        if not agent_results:
-            return "我还没能确定下一步怎么处理。你可以换一种说法，告诉我想找竞赛、整理通知，还是准备材料。"
+        user_input = str(input_data.get("user_input", "")).strip()
+        history = input_data.get("history", [])
+        if not user_input or not isinstance(history, list):
+            return None
 
-        statuses = [result.get("status", "failed") for result in agent_results]
-        actionable_issue = self._build_actionable_issue_answer(agent_results)
-        if actionable_issue and any(
-            status in {"failed", "need_input", "skipped"} for status in statuses
-        ):
-            return actionable_issue
+        user_profile = input_data.get("user_profile", {})
+        major = str(user_profile.get("major", "")).strip()
+        interests = user_profile.get("interests", [])
+        grade = str(user_profile.get("grade", "")).strip()
+
         recommendations = self._recommendations_from_agent_results(agent_results)
-        collected_count = self._collected_item_count(agent_results)
-        if not recommendations and collected_count == 0:
-            return (
-                "这轮没有找到符合当前专业方向和竞赛级别的有效候选，因此暂时没有推荐结果。"
-                "你可以放宽级别，或者允许本专业相关的交叉方向，我再重新查找。"
-            )
-        if recommendations and any(status == "success" for status in statuses):
-            names = "、".join(
-                r.get("title", "")
-                for r in recommendations[:3]
-                if isinstance(r, dict) and r.get("title")
-            )
-            if all(status == "success" for status in statuses):
-                return f"已为你推荐以下竞赛：{names}。你可以继续问我其中某个竞赛的详情，或者选择一个项目准备报名材料。"
-            return f"已为你推荐以下竞赛：{names}。部分竞赛的详细信息可能不够完整，建议以官网通知为准。"
-        if all(status == "success" for status in statuses):
-            return "已经处理完成。你可以继续问我其中某个竞赛的详情，或者选择一个项目准备报名材料。"
-        if any(status == "success" for status in statuses):
-            return "我已经整理出一部分结果，不过还有少量信息没有完整获取。建议你先查看现有内容，我会把需要核实的地方保留下来。"
-        if any(status == "need_input" for status in statuses):
-            return "当前缺少可供处理的具体数据，请补充竞赛通知、候选项目或明确的材料内容。"
-        return "这次处理没有顺利完成，可能是数据源或模型服务暂时不可用。你可以稍后重试，我会保留已经提供的条件。"
 
+        # Build a concise context snippet for the LLM
+        user_context_parts = []
+        if major:
+            user_context_parts.append(f"专业：{major}")
+        if grade:
+            user_context_parts.append(f"年级：{grade}")
+        if interests:
+            user_context_parts.append(f"兴趣：{'、'.join(str(i) for i in interests)}")
+        user_context = "，".join(user_context_parts) if user_context_parts else "无明确画像"
+
+        rec_summary = ""
+        if recommendations:
+            parts = []
+            for r in recommendations[:5]:
+                title = r.get("title", "")
+                score = r.get("match_score", "")
+                reason = r.get("reason", "")
+                s = title
+                if score not in (None, ""):
+                    s += f"(匹配度{score})"
+                if reason:
+                    s += f"：{reason}"
+                parts.append(s)
+            rec_summary = "\n".join(parts)
+
+        statuses = [r.get("status", "failed") for r in agent_results]
+        all_success = all(s == "success" for s in statuses) if statuses else False
+        has_failure = any(s in {"failed", "need_input", "skipped"} for s in statuses)
+
+        llm_config = self.config.get("llm", {}) if isinstance(self.config, dict) else {}
+        api_key_env = llm_config.get("api_key_env", "DEEPSEEK_API_KEY")
+        api_key = llm_config.get("api_key", "") or os.getenv(str(api_key_env), "")
+        if not api_key:
+            return None
+        base_url = llm_config.get("base_url") or os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        model = llm_config.get("model") or os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+
+        system_prompt = (
+            "你是大学生竞赛助手「赛知通」，用自然的中文口语回复用户。\n"
+            "你的回复风格：\n"
+            "1. 如果推荐评分为空或失败，简洁自然地告知用户当前情况。\n"
+            "2. 如果推荐评分成功且有推荐项目，使用自然、热情的语调介绍推荐结果。\n"
+            "3. 回复中不要出现「智能体」「Agent」「用户画像」「匹配度得分」等系统术语。\n"
+            "4. 回复要针对用户的具体问题，避免模板化套话。\n"
+            "5. 如果有推荐项目，用1-2句话自然引出，引导用户进一步询问。\n"
+            "6. 控制在200字以内。"
+        )
+
+        user_prompt = (
+            f"用户画像：{user_context}\n"
+            f"本轮用户说：「{user_input}」\n"
+            f"所有子步骤成功：{'是' if all_success else '否'}\n"
+            f"存在失败：{'是' if has_failure else '否'}\n"
+            f"推荐项目：\n{rec_summary if rec_summary else '无推荐'}\n\n"
+            f"请根据用户输入和推荐结果给出自然回复。"
+        )
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 400,
+        }
+        request = urllib.request.Request(
+            url=base_url.rstrip("/") + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=int(llm_config.get("timeout", 30))) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+            content = str(response_data["choices"][0]["message"]["content"] or "").strip()
+            return content if content else None
+        except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError, TimeoutError):
+            return None
+
+    def _build_final_answer(
+        self,
+        agent_results: list[dict[str, Any]],
+        planning: dict[str, Any] | None = None,
+        input_data: dict[str, Any] | None = None,
+    ) -> str:
+        """Generate final answer.
+
+        Uses LLM generation first; falls back to deterministic templates.
+        """
+        planning = planning or {}
+        input_data = input_data or {}
+
+        # Try LLM-generated conversational answer
+        llm_answer = self._generate_conversational_answer(agent_results, planning, input_data)
+        if llm_answer:
+            return llm_answer
+
+        # ---------- deterministic fallback ----------
     @staticmethod
     def _build_actionable_issue_answer(
         agent_results: list[dict[str, Any]],
