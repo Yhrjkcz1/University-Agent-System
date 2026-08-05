@@ -1,363 +1,148 @@
-# AI Agent Project Development Specification
+# SaiZhiTong Project Specification
 
-Version: v1.0
+Version: 2.0
 
-## 1. Project Overview
+Updated: 2026-08-05
 
-This project is a Multi-Agent system based on:
+Scope: development, deployment, testing, and acceptance of the current `main` branch
 
-Main Agent + Multiple Sub Agents
+## 1. Product Scope
 
-The system uses dynamic orchestration. The workflow is not fixed.
+SaiZhiTong is a multi-agent assistant for university competition discovery and preparation. It collects a user profile through conversation, retrieves structured competition records, recommends suitable opportunities, explains details, and generates editable Word drafts.
 
-Main Agent decides which Sub Agent(s) should be called according to:
-- User requirements
-- Task type
-- Current context
-- Previous results
+The service is decision support only. Official competition pages and human review remain authoritative.
 
-Basic flow:
+## 2. Production Architecture
 
-User Input
-    ↓
-Main Agent
-    ↓
-Select Required Agent(s)
-    ↓
-Sub Agent Execution
-    ↓
-Main Agent Integration
-    ↓
-Final Output
+| Layer | Technology | Responsibility |
+|---|---|---|
+| Frontend | React, TypeScript, Vite, Ant Design | Chat, library, favorites, authentication, admin UI |
+| Backend | FastAPI, Pydantic, Uvicorn | Agent API, auth, data access, downloads, refresh dispatch |
+| Agents | MainAgent plus four domain agents | Orchestration, collection, extraction, recommendation, materials |
+| Data | Supabase / PostgreSQL | Competitions, users, conversations, portraits, favorites, jobs |
+| Jobs | GitHub Actions | Scheduled and manual competition refresh |
+| Hosting | GitHub Pages and Render | Static frontend and Python API |
 
+Streamlit and Gradio are compatibility-only local debugging entry points.
 
-## 2. Project Structure
+## 3. Agent Responsibilities
 
-```
-AI-Agent-Project/
+- **MainAgent**: intent recognition, conversation state, routing, result integration, safe fallback messages.
+- **InfoCollectAgent**: source collection, file parsing, URL normalization, change detection, source-level error reporting.
+- **InfoExtractAgent**: structured extraction of organizers, dates, categories, levels, URLs, and attachments.
+- **RecommendationAgent**: hard filtering, ranking, diversity, reasons, risks, and actionable next steps.
+- **MaterialAgent**: target and material selection, editable `.docx` generation, safe error handling, human-review notice.
 
-├── main.py
+## 4. Core Flows
 
-├── agents/
-│   ├── main_agent.py
-│   ├── info_collect_agent.py
-│   ├── info_extract_agent.py
-│   ├── recommendation_agent.py
-│   └── material_agent.py
+```text
+Recommendation:
+profile completion → Supabase candidates → filter/rank → explanation
 
-├── config/
-│   └── config.yaml
+Detail follow-up:
+conversation reference → selected recommendation → structured details
 
-├── data/
-│   ├── raw/
-│   ├── processed/
-│   ├── output/
-│   └── temp/
+Material generation:
+competition selection → material selection → required inputs → Word download
 
-├── logs/
-├── tests/
-├── requirements.txt
-└── README.md
+Database refresh:
+GitHub Actions → source crawl → change detection → extraction → Supabase
 ```
 
-Rules:
-- Do not change Agent filenames.
-- Final outputs must be stored in data/output/.
-- Temporary files must be stored in data/temp/.
-- Configurations must be stored in config/.
+Interactive recommendation requests must not start a synchronous web crawl.
 
+## 5. API Contract
 
-## 3. Agent Architecture
+Production entry point: `api.py`.
 
-### Main Agent
+Key endpoints:
 
-File:
-agents/main_agent.py
+- `GET /`: health check
+- `POST /api/agent/run`: one conversation turn
+- `GET /api/competitions`: competition library
+- `POST /api/competitions/refresh`: dispatch refresh
+- `GET /api/competitions/refresh/status`: refresh status
+- `/api/auth/*`: registration, login, refresh, logout, profile
+- `/api/conversations/*`: conversation persistence
+- `/api/saved-competitions/*`: favorites
+- `/api/admin/*`: protected administration
 
-Class:
-MainAgent
-
-Responsibilities:
-- Receive user requests.
-- Understand task requirements.
-- Determine task type.
-- Select required Sub Agents.
-- Control execution process.
-- Integrate final results.
-
-Main Agent is responsible for:
-Input Understanding + Agent Scheduling + Result Integration
-
-
-### Sub Agents
-
-InfoCollectAgent:
-- Collect raw information from web sources, knowledge base, files, or APIs.
-
-InfoExtractAgent:
-- Convert unstructured information into structured data.
-
-RecommendationAgent:
-- Match projects with user requirements and provide scores and reasons.
-
-MaterialAgent:
-- Generate application-related materials such as project introduction, reasons, plans, and checklists.
-
-
-## 4. Agent Communication Protocol
-
-All Agents must communicate using Python dict / JSON format.
-
-Every Agent must implement:
-
-```python
-def run(input_data: dict) -> dict:
-    pass
-```
-
-Rules:
-- run() is the only external interface.
-- Main Agent can only call Sub Agents through run().
-- All inputs must be dict.
-- All outputs must be dict.
-
-
-## 5. Standard Input Format
+Agent request:
 
 ```json
 {
-  "task_id": "",
-  "user_input": "",
-  "task_type": "",
-  "user_profile": {},
-  "context": {},
-  "input_data": {},
-  "history": [],
-  "required_output": "markdown",
-  "metadata": {}
+  "user_input": "I am a third-year computer science student interested in AI competitions.",
+  "state_snapshot": {}
 }
 ```
 
-Required fields:
-- task_id
-- user_input
-- task_type
-- user_profile
-- context
-- input_data
-- history
-- required_output
-- metadata
+Agent responses must contain `success`, `response`, `state_snapshot`, and `metadata`.
 
+## 6. State and Data Rules
 
-## 6. Standard Output Format
+Conversation state must remain JSON serializable and retain the current intent, profile, last recommendations, selected competition, material type, and missing fields.
 
-```json
-{
-  "task_id": "",
-  "agent_name": "",
-  "status": "",
-  "data": {},
-  "message": "",
-  "error": null,
-  "next_action": null,
-  "metadata": {}
-}
+Competition records should include:
+
+- title and authoritative URL;
+- source and source text;
+- description and structured summary;
+- organizer;
+- registration and contest dates;
+- category and level;
+- extraction and refresh metadata.
+
+Missing values must remain empty or null. Agents must not invent official facts. Date timezone conversion must follow an explicit business rule and must not silently change the official calendar date.
+
+## 7. Database and Deployment
+
+Run the idempotent migrations in this order:
+
+1. `migration.sql`
+2. `migration_auth.sql`
+
+The API currently requires `competitions.summary`. A deployment whose database lacks this column is invalid and will return 503 from the competition endpoint.
+
+Frontend deployment uses `.github/workflows/deploy.yml`. Backend deployment uses `render.yaml`. `VITE_API_BASE_URL` must point to the production API, and `ALLOWED_ORIGINS` must contain the actual GitHub Pages or custom-domain origin.
+
+## 8. Security Requirements
+
+- Set a strong production `JWT_SECRET_KEY`.
+- Keep service-role keys, database passwords, LLM keys, and GitHub tokens server-side.
+- Enforce authentication and role checks for protected routes.
+- Do not expose tracebacks, SQL messages, internal paths, or secrets to users.
+- Do not log passwords or complete tokens.
+- Treat generated documents as potentially sensitive user data.
+
+## 9. Quality Gate
+
+Required commands:
+
+```powershell
+python -m pytest tests -q -p no:cacheprovider
+Set-Location frontend
+npm run build
 ```
 
-Status values:
-
-- success
-- failed
-- partial
-- need_input
-- skipped
-
-
-Rules:
-- Failed execution must return error information.
-- Agent failure must not crash the whole system.
-
-
-## 7. Agent Code Structure
-
-Every Agent should follow:
-
-```python
-class ExampleAgent:
-
-    def __init__(self, config):
-        self.config = config
-
-    def run(self, input_data):
-        pass
-
-    def validate_input(self, input_data):
-        pass
-
-    def process(self, input_data):
-        pass
-```
-
-Rules:
-- run() is the only external interface.
-- Use modular functions.
-- Handle exceptions internally.
-- Return standard output format.
-
-
-## 8. Code Style
-
-Class names:
-
-PascalCase
-
-Example:
-InfoCollectAgent
-
-
-Functions and variables:
-
-snake_case
-
-Example:
-extract_information()
-task_id
-agent_result
-
-
-Forbidden:
-- Hard-coded API keys.
-- Hard-coded absolute paths.
-- Returning raw strings or lists instead of standard output format.
-
-
-## 9. Configuration Rules
-
-All configurable parameters must be stored in:
-
-config/config.yaml
-
-Including:
-- Model settings
-- API settings
-- File paths
-- Agent parameters
-- Output settings
-
-Do not hard-code:
-- API keys
-- Model names
-- Important parameters
-- File paths
-
-
-## 10. Agent Specific Data Rules
-
-The global communication format cannot be changed.
-
-Each Agent can only customize:
-
-input_data
-
-and
-
-data
-
-The communication layer remains:
-
-- task_id
-- status
-- message
-- error
-- metadata
-
-
-## 11. File Naming Rules
-
-Use:
-- lowercase English
-- underscores
-- meaningful names
-
-Examples:
-
-competition_raw_task_001.json
-
-recommendation_result_task_001.md
-
-Do not use:
-
-- Chinese filenames
-- Spaces
-- Random names
-
-
-Storage:
-
-raw data:
-data/raw/
-
-processed data:
-data/processed/
-
-final output:
-data/output/
-
-temporary files:
-data/temp/
-
-
-## 12. AI Assisted Development Rules
-
-When using AI coding assistants:
-
-This specification must be provided to the AI.
-
-AI-generated code must:
-- Follow project structure.
-- Keep Agent filenames unchanged.
-- Keep class names unchanged.
-- Keep run() interface unchanged.
-- Follow input/output protocols.
-- Use configuration files.
-- Avoid unnecessary architecture changes.
-
-
-Recommended instruction:
-
-"Generate code according to PROJECT_SPEC.md. Do not modify project architecture. Follow the defined Agent interface and communication protocol."
-
-
-## 13. Agent Completion Criteria
-
-An Agent is complete only when:
-
-- Correct file created.
-- Correct class implemented.
-- run() implemented.
-- Input/output format follows specification.
-- Error handling implemented.
-- Can run independently.
-- Can be called by Main Agent.
-
-
-## 14. Final Rule
-
-This document is the global development specification.
-
-All developers and AI assistants must follow this document when:
-
-- Designing Agents.
-- Writing code.
-- Modifying modules.
-- Adding new functions.
-- Integrating multiple Agents.
-
-Any modification to:
-- Project structure
-- Agent architecture
-- Communication protocol
-- Input/output format
-
-must update this document first.
+Formal acceptance requires:
+
+- all tests under `tests/` passing;
+- a successful frontend production build;
+- healthy API and OpenAPI endpoints;
+- a 200 response from the real competition library;
+- end-to-end checks for auth, recommendation, follow-up, document generation, favorites, and refresh;
+- the latest Supabase migrations;
+- correct production CORS and API configuration.
+
+## 10. Current Status
+
+Local review on 2026-08-05 found:
+
+- frontend production build: passed;
+- backend suite: 158 passed, 9 failed, 3 collection errors;
+- Supabase schema: missing `competitions.summary` in the connected environment;
+- regressions in date parsing, refresh statistics, and several dialogue flows;
+- a placeholder CORS origin in `render.yaml`;
+- a large frontend main bundle.
+
+The project is suitable for internal pre-acceptance, but the blocking issues must be resolved before formal acceptance. See `docs/PROJECT_REVIEW_2026-08-05.md` and `docs/ACCEPTANCE_GUIDE_CN.md`.

@@ -1,347 +1,254 @@
 # 赛智通（SaiZhiTong）
 
-赛智通是面向大学生科研与竞赛场景的多智能体对话助手。用户可以像使用 ChatGPT 一样描述自己的专业、年级、兴趣和参赛目标；系统会在信息不足时继续追问，随后完成竞赛信息采集、通知抽取、项目推荐、赛事详情解释和报名材料生成。
+赛智通是面向大学生科研与竞赛场景的多智能体对话助手。系统通过连续对话了解用户的专业、年级、技能、兴趣和参赛目标，并协同完成竞赛信息采集、通知结构化抽取、个性化推荐、竞赛详情解释、收藏管理和 Word 报名材料生成。
 
-> 当前版本用于课程、竞赛和研究演示。竞赛信息、推荐结果与生成材料仅供辅助决策，正式报名或提交前请以赛事官网为准并人工复核。
+> 当前版本适用于课程设计、竞赛展示、科研演示和内部试用。竞赛信息、推荐结果及生成材料仅供辅助决策；正式报名或提交前必须以赛事官网为准并人工复核。
 
-当前生产环境采用 **React + GitHub Pages（前端）**、**FastAPI + Render（后端）**、
-**Supabase（数据库）** 和 **GitHub Actions（异步刷新任务）**。Streamlit 和
-Gradio 入口仍保留用于本地调试。
+## 项目状态
 
-## 当前功能
+- 当前分支：`main`
+- 生产架构：React + GitHub Pages、FastAPI + Render、Supabase、GitHub Actions
+- 本地验收基线（2026-08-05）：前端生产构建通过；后端测试 158 项通过、9 项失败、3 项收集错误
+- 当前结论：已具备内部预验收形态，完成数据库迁移、CORS 配置和回归修复后再进行正式验收
 
-- GPT 风格对话界面：React 前端提供连续对话、竞赛库和会话状态展示。
-- 上下文信息收集：专业和年级明确后，可一次性补充竞赛方向、技能和级别偏好。
-- 竞赛信息采集：支持赛氪、52竞赛、天池、和鲸和 DataFountain 等来源，也支持解析本地通知文件。
-- 通知结构化抽取：提取名称、截止日期、主办方、参赛要求和原始网页等字段。
-- 个性化推荐：综合用户画像、兴趣、截止日期和硬性条件进行筛选与排序。
-- 赛事详情追问：用户可通过“详细介绍第二个”等自然语言继续了解刚才的推荐结果。
-- 智能任务路由：根据当前对话状态区分信息补充、项目推荐、赛事详情和材料生成，避免重复推荐。
-- Word 材料生成：生成可编辑的 `.docx` 初稿，支持竞赛报名个人简历及项目材料；文件名包含对应竞赛名称。
-- 异步数据库刷新：网页按钮或每天北京时间 02:00 的定时任务在 GitHub Actions 中运行采集和抽取，不阻塞推荐对话。
-- 降级运行：LLM 暂时不可用时，系统仍会尽量保留采集到的可信字段并使用规则完成基础流程。
+详细状态和整改项见：
 
-## Agent 分工
+- [项目评审报告](docs/PROJECT_REVIEW_2026-08-05.md)
+- [验收与演示指南](docs/ACCEPTANCE_GUIDE_CN.md)
+- [中文项目规范](docs/PROJECT_SPEC_CN.md)
+- [English Project Specification](docs/PROJECT_SPEC.md)
 
-```text
-用户对话
-   │
-   ▼
-MainAgent（理解意图、维护上下文、调度与整合结果）
-   │
-   ├── InfoCollectAgent       采集公开竞赛数据或解析本地文件
-   ├── InfoExtractAgent       抽取结构化竞赛字段
-   ├── RecommendationAgent    补全推荐所需画像并完成匹配排序
-   └── MaterialAgent          生成可下载的 Word 报名材料
-```
+## 核心能力
 
-典型流程：
+- **自然语言连续对话**：MainAgent 识别用户意图、维护状态并调度其他 Agent。
+- **用户画像补全**：收集专业、年级、技能、方向、竞赛级别和时间偏好。
+- **竞赛信息采集**：支持赛氪、52竞赛、天池、和鲸和 DataFountain 等来源。
+- **通知结构化抽取**：提取名称、主办方、报名时间、比赛时间、类别、级别、官网及附件。
+- **个性化推荐**：结合用户画像、硬性条件、兴趣与截止时间筛选并排序。
+- **上下文追问**：支持“详细介绍第二个”“给刚才那个生成材料”等指代。
+- **Word 材料生成**：生成可编辑的个人简历、报名表、项目材料和准备计划初稿。
+- **账户与会话**：支持注册登录、JWT、会话历史、用户画像、收藏和管理员页面。
+- **异步数据刷新**：网页或定时任务触发 GitHub Actions，不阻塞在线对话。
+- **降级运行**：LLM 不可用时保留规则型基础流程并返回明确提示。
+
+## 系统架构
 
 ```text
-竞赛推荐：信息补全 → 读取 Supabase 已处理数据 → 项目推荐
-数据库刷新：InfoCollectAgent → 仅对新增/变化记录运行 InfoExtractAgent → Supabase
-粘贴通知：通知抽取 → 详情展示或项目推荐
-了解项目：读取本轮推荐上下文 → 返回简介、官网和待核实事项
-生成材料：确认目标竞赛与材料类型 → MaterialAgent → Word 下载
+React / GitHub Pages
+        │ HTTPS + JWT
+        ▼
+FastAPI / Render
+        │
+        ├── MainAgent：意图识别、上下文、任务调度、结果整合
+        ├── InfoCollectAgent：公开竞赛数据与文件采集
+        ├── InfoExtractAgent：通知字段结构化抽取
+        ├── RecommendationAgent：候选筛选、排序与解释
+        └── MaterialAgent：Word 材料生成
+        │
+        ├── Supabase：竞赛库、账户、会话、画像、收藏、刷新任务
+        └── GitHub Actions：每日及手动竞赛库刷新
 ```
 
-无关问题不会被误判为竞赛任务。系统会说明当前能力范围，并引导用户回到竞赛推荐、通知分析或材料生成。
+主要业务链路：
+
+```text
+竞赛推荐：补全画像 → 读取 Supabase 候选 → 筛选与排序 → 推荐解释
+详情追问：读取本轮推荐上下文 → 定位竞赛 → 返回详情与待核实项
+材料生成：确认目标竞赛 → 选择材料类型 → 生成 Word → 下载
+数据刷新：采集各来源 → 比较内容哈希 → 抽取新增/变化记录 → 写入 Supabase
+```
 
 ## 项目结构
 
 ```text
 .
-├── agents/
-│   ├── main_agent.py              # 主调度与对话意图处理
-│   ├── info_collect_agent.py      # 信息采集 Agent
-│   ├── info_extract_agent.py      # 信息抽取 Agent
-│   ├── recommendation_agent.py    # 项目推荐 Agent
-│   ├── material_agent.py          # Word 材料生成 Agent
-│   └── info_collect/              # 采集器、解析器和存储组件
-├── config/
-│   ├── config.yaml                # 非敏感运行配置
-│   ├── extraction_prompt.yaml     # 信息抽取提示词
-│   └── material_prompts.yaml      # 材料模板
-├── data/                          # 运行数据与生成文件
-├── docs/                          # 项目规范文档
-├── tests/                         # 自动化测试
-├── frontend/                      # React + TypeScript + Vite 生产前端
-├── api.py                         # FastAPI 生产后端
-├── scripts/refresh_competitions.py # GitHub Actions 刷新入口
-├── streamlit_app.py               # 旧版 Streamlit 调试入口
-├── app.py                         # 旧版 Gradio 调试入口
-├── main.py                        # 命令行演示入口
-├── render.yaml                    # Render 生产后端部署配置
-├── requirements.txt               # 核心 Python 依赖
-└── requirements-embedding.txt     # 可选本地 ONNX embedding 依赖
+├── agents/                         # MainAgent 与四个业务 Agent
+│   ├── info_collect/               # 数据源客户端、解析器与存储层
+│   └── ReAgent_New/                # 推荐排序实现
+├── auth/                           # JWT、账户与会话服务
+├── config/                         # 非敏感配置和提示词模板
+├── docs/                           # 规范、评审和验收材料
+├── frontend/                       # React + TypeScript + Vite 前端
+├── scripts/                        # 数据刷新及任务状态脚本
+├── tests/                          # 自动化测试
+├── api.py                          # FastAPI 生产入口
+├── streamlit_app.py                # 本地兼容调试入口
+├── app.py                          # Gradio 兼容调试入口
+├── migration.sql                   # 竞赛和刷新相关数据库迁移
+├── migration_auth.sql              # 账户、会话及补充迁移
+├── render.yaml                     # Render 后端部署配置
+└── requirements.txt                # Python 核心依赖
 ```
 
 ## 环境要求
 
-- Python 3.11（推荐版本）
-- pip
-- Node.js 20 和 npm（React 前端）
-- DeepSeek API Key（建议配置；未配置时部分能力进入降级模式）
+- Python 3.11
+- Node.js 20 与 npm
+- Supabase 项目
+- DeepSeek API Key（推荐；缺失时部分能力降级）
+- GitHub Token（仅在网页触发 Actions 刷新时需要）
 
-安装依赖：
+建议使用独立 Python 虚拟环境，避免与系统或 Anaconda 共享环境中的包冲突。
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Render 512MB 实例默认使用轻量 TF-IDF 候选粗排，不应启用本地 ONNX
-embedding。内存充足的本地环境如需开启，可执行：
+前端依赖：
 
 ```powershell
-pip install -r requirements-embedding.txt
-$env:ENABLE_LOCAL_EMBEDDING="true"
+Set-Location frontend
+npm install
 ```
 
-Windows 下创建本地环境变量文件：
+## 环境变量
+
+复制示例文件：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-在 `.env` 中填写：
+主要变量：
 
-```env
-DEEPSEEK_API_KEY=your_deepseek_api_key
-DEEPSEEK_MODEL=deepseek-chat
+| 变量 | 用途 | 部署位置 |
+|---|---|---|
+| `DEEPSEEK_API_KEY` | LLM 对话、抽取和材料生成 | Render、GitHub Actions、本地后端 |
+| `SUPABASE_URL` | Supabase 项目地址 | Render、GitHub Actions、本地后端 |
+| `SUPABASE_ANON_KEY` | 后端受限读取或兼容配置 | Render、GitHub Actions、本地后端 |
+| `SUPABASE_SERVICE_ROLE_KEY` | 服务端写入和管理操作 | Render、GitHub Actions；禁止放入前端 |
+| `SUPABASE_DB_PASSWORD` | 可选的 PostgreSQL 直连建表 | 本地或受保护服务端 |
+| `JWT_SECRET_KEY` | JWT 签名密钥 | Render、本地后端 |
+| `ALLOWED_ORIGINS` | 允许访问 API 的前端 Origin | Render、本地后端 |
+| `GITHUB_ACTIONS_TOKEN` | 从后端触发刷新工作流 | Render |
+| `REFRESH_IP_HASH_SALT` | 刷新接口限流哈希盐 | Render |
+| `ENABLE_LOCAL_EMBEDDING` | 是否启用本地 ONNX embedding | 默认 `false` |
 
-# Supabase 云存储
-SUPABASE_URL=your_supabase_url
-SUPABASE_ANON_KEY=your_supabase_anon_key
-SUPABASE_SERVICE_ROLE_KEY=your_supabase_secret_or_service_role_key
-# 数据库密码，用于首次运行时自动建表
-SUPABASE_DB_PASSWORD=your_database_password
+不要提交真实 `.env`、API Key、数据库密码、JWT 密钥或 service-role key。
 
-# Render 触发 GitHub Actions 数据刷新
-GITHUB_ACTIONS_TOKEN=your_fine_grained_github_token
-REFRESH_IP_HASH_SALT=replace_with_a_random_secret
-ENABLE_LOCAL_EMBEDDING=false
-```
+## 数据库初始化与升级
 
-> 新版 Supabase 的 Publishable key 对应旧版 anon key；`sb_secret_...`
-> Secret key 对应旧版 service-role key。Secret/service-role key 只能用于
-> Render、GitHub Actions或本地后端，绝不能放入前端。
->
-> 数据库密码在 Supabase Dashboard → Settings → Database → Connection string 中查看（替换 `[YOUR-PASSWORD]` 部分）。
+在 Supabase SQL Editor 依次执行：
 
-不要把真实 API Key、数据库密码写入源码、README 或 Git 提交。`.env` 已被 Git 忽略。
+1. `migration.sql`
+2. `migration_auth.sql`
+
+每次拉取包含数据库字段变更的版本后，都应重新执行幂等迁移。当前 API 会读取 `competitions.summary`；数据库未升级时，竞赛库接口会返回 503。
+
+数据库主要包含：
+
+- `competitions`：竞赛信息、摘要、日期、来源和抽取状态
+- `crawl_logs`、`refresh_jobs`、`refresh_tokens`：采集与刷新任务
+- `profiles`、`login_attempts`：账户和安全记录
+- `conversations`、`user_portraits`：会话和用户画像
+- `saved_competitions`：用户收藏
 
 ## 本地运行
 
-当前生产架构的本地启动方式：
+启动后端：
 
 ```powershell
-# 仓库根目录启动 FastAPI
 uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+```
 
-# 另一个终端启动 React 前端
+启动前端：
+
+```powershell
 Set-Location frontend
-npm install
 $env:VITE_API_BASE_URL="http://localhost:8000"
 npm run dev
 ```
 
-推荐使用 Streamlit 对话界面：
+访问：
+
+- 前端：`http://localhost:5173`
+- 后端健康检查：`http://localhost:8000/`
+- OpenAPI：`http://localhost:8000/docs`
+
+兼容调试入口：
 
 ```powershell
 streamlit run streamlit_app.py
-```
-
-浏览器通常会自动打开 `http://localhost:8501`。如未自动打开，请手动访问该地址。
-
-旧版 Gradio 调试界面仍可运行：
-
-```powershell
 python app.py
 ```
 
-默认地址为 `http://127.0.0.1:7860`。
+生产验收应以 React + FastAPI 链路为准，不以 Streamlit 或 Gradio 入口代替。
 
-## 对话示例
+## 自动化检查
 
-```text
-用户：我是计算机专业大三学生，想参加人工智能方向的国家级竞赛。
-助手：你目前掌握哪些技能？例如 Python、算法、机器学习或团队协作。
-用户：我会 Python 和机器学习，也有团队协作经验。
-助手：根据已记录的信息，为你采集并推荐合适的竞赛……
-用户：详细介绍第二个。
-助手：返回该竞赛的简要概括、匹配原因、截止日期、官网链接和待核实事项。
-用户：给第二个竞赛生成报名个人简历。
-助手：确认目标和材料类型后生成 Word 文件，可在侧栏下载。
-```
-
-生成的文件示例：
-
-```text
-2026华智高校大学生人工智能大赛_竞赛报名个人简历.docx
-```
-
-## 自动化测试
-
-运行完整测试：
+后端测试：
 
 ```powershell
-python -m pytest -q -p no:cacheprovider
+python -m pytest tests -q -p no:cacheprovider
 ```
 
-测试覆盖四个子 Agent、MainAgent 调度、对话状态、意图纠正、推荐详情、材料选择、Word 文件生成以及 LLM 降级流程。
+> 建议显式指定 `tests`。仓库根目录的 `test_crawler.py` 是手工诊断脚本，当前会被默认 pytest 规则误收集。
 
-## 部署到 Streamlit Community Cloud
+前端生产构建：
 
-> 当前生产部署使用 GitHub Pages + Render。此章节保留用于旧版 Streamlit
-> 调试入口。
+```powershell
+Set-Location frontend
+npm run build
+```
 
-1. 将功能分支通过 Pull Request 合并到 GitHub `main`。
-2. 登录 [Streamlit Community Cloud](https://share.streamlit.io/)。
-3. 选择本项目仓库、`main` 分支和入口文件 `streamlit_app.py`。
-4. 在 App 的 **Settings → Secrets** 中配置：
+推荐验收顺序：
 
-   ```toml
-   DEEPSEEK_API_KEY = "你的真实密钥"
-   DEEPSEEK_MODEL = "deepseek-chat"
-   SUPABASE_URL = "你的 Supabase 项目 URL"
-   SUPABASE_ANON_KEY = "你的 Supabase 匿名密钥"
-   SUPABASE_DB_PASSWORD = "你的数据库密码"
-   ```
+1. 后端健康检查与 OpenAPI。
+2. 竞赛库接口返回数据，而不是 503。
+3. 注册、登录、刷新令牌和退出。
+4. 用户画像补全与推荐。
+5. 推荐详情追问和指代识别。
+6. Word 材料生成与下载。
+7. 收藏、会话恢复及管理员页面。
+8. 手动刷新任务及状态查询。
 
-5. 保存后点击 Deploy 或 Reboot app。
+## 部署
 
-后续合并到 `main` 的提交通常会触发自动重新部署。如果线上仍显示旧版，可在 Streamlit 管理页面执行 Reboot app。
+### 前端：GitHub Pages
 
-## 数据与生成文件
+`.github/workflows/deploy.yml` 在 `main` 更新后使用 Node.js 20 构建 `frontend/` 并部署到 GitHub Pages。生产 API 地址通过 `VITE_API_BASE_URL` 注入。
 
-- `data/raw`：JSON 模式下持久化的原始竞赛数据和日志。
-- `data/processed`：结构化处理结果。
-- `data/output`：MaterialAgent 生成的 `.docx` 文件。
-- `data/temp`：运行期临时文件。
+### 后端：Render
 
-**Supabase 持久化存储**：配置 `SUPABASE_URL` + `SUPABASE_ANON_KEY` + `SUPABASE_DB_PASSWORD` 后，采集到的竞赛数据会写入云端 PostgreSQL 数据库。用户对话中的推荐请求直接从数据库读取已有数据，不触发爬虫；数据的采集和更新由独立的刷新流程负责（见下方竞赛库逻辑全量刷新）。
-
-### 竞赛库逻辑全量刷新
-
-1. 在 Supabase SQL Editor 依次执行 `migration.sql` 和
-   `migration_auth.sql`，创建全部 9 张表及索引。
-2. 在 GitHub Actions Secrets 配置 `SUPABASE_URL`、
-   `SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_ROLE_KEY` 和
-   `DEEPSEEK_API_KEY`。
-3. 在 Render 配置 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、
-   `SUPABASE_SERVICE_ROLE_KEY`、`DEEPSEEK_API_KEY` 和
-   `GITHUB_ACTIONS_TOKEN`。
-4. Fine-grained GitHub Token 必须允许访问当前仓库，并配置
-   **Repository permissions → Actions → Read and write**。
-5. 合并到 `main` 后，`Refresh Competition Database` 工作流支持网页
-   手动触发，并在北京时间每天 02:00 自动运行。
-
-刷新会重新扫描所有数据源，通过内容哈希区分新增、变化和未变化记录。
-只有新增或原文变化的记录进入信息抽取；单个来源失败时保留该来源旧数据，
-明确过期的竞赛会被删除。
-
-刷新链路为：
+`render.yaml` 使用 Python 3.11 和以下启动命令：
 
 ```text
-竞赛库按钮 → Render API → GitHub Actions → InfoCollectAgent
-           → InfoExtractAgent → Supabase
+uvicorn api:app --host 0.0.0.0 --port $PORT
 ```
 
-GitHub Actions 只提供临时运行环境，实际采集和抽取仍由项目中的两个 Agent
-执行。Render 与 GitHub Actions 必须连接同一个 `SUPABASE_URL`。
+`ALLOWED_ORIGINS` 必须配置为真实 GitHub Pages Origin 或自定义域名，不能保留示例域名。
 
-## Supabase 数据库表结构
+### 数据刷新：GitHub Actions
 
-配置好 Supabase 后，首次启动会自动通过直连 PostgreSQL 建表。如果自动建表受限，可以在 Supabase SQL Editor 中依次执行 `migration.sql` 和 `migration_auth.sql`。
+`refresh-competitions.yml` 支持：
 
-数据库共 9 张表，以下列出 3 张核心表，完整建表语句见两个 migration 文件。
-
-### competitions — 竞赛数据主表
-
-| 列 | 类型 | 说明 |
-|---|---|---|
-| id | BIGSERIAL | 主键 |
-| title | TEXT | 竞赛标题 |
-| url | TEXT | 竞赛页面链接 |
-| source | TEXT | 数据来源（saikr / 52jingsai / ali_tianchi / heywhale / datafountain） |
-| publish_date | TEXT | 发布日期 |
-| description | TEXT | 竞赛描述全文 |
-| summary | TEXT | LLM 提取的结构化摘要 |
-| organizer | TEXT | 主办方名称 |
-| organizer_list | JSONB | 主办单位列表 |
-| co_organizers | JSONB | 协办单位列表 |
-| supporters | JSONB | 支持单位列表 |
-| regist_start | TEXT | 报名开始时间 |
-| regist_end | TEXT | 报名截止时间 |
-| contest_start | TEXT | 比赛开始时间 |
-| contest_end | TEXT | 比赛结束时间 |
-| category | TEXT | 竞赛类别（如 AI、数学） |
-| level | TEXT | 竞赛级别（如国家级、省部级） |
-| attachments | JSONB | 附件列表 |
-| raw_text | TEXT | 原始文本全文 |
-| collected_at | TEXT | 采集时间 |
-| updated_at | TEXT | 最后更新时间 |
-| content_hash | TEXT | SHA-256 内容哈希，增量刷新时用于检测变化 |
-| extraction_status | TEXT | 抽取状态：pending / completed / failed |
-| extraction_error | TEXT | 抽取失败时的错误信息 |
-| extracted_at | TEXT | 抽取完成时间 |
-| last_seen_at | TEXT | 最近一次刷新时仍存在于源站的时间 |
-| refresh_job_id | BIGINT | 关联的刷新任务 ID → refresh_jobs.id |
-
-- **唯一约束**: `(url, source)`，同一来源同一链接不重复存储
-- **索引**: `collected_at DESC`、`content_hash`、`extraction_status`、`last_seen_at DESC`
-
-### profiles — 用户账户表
-
-| 列 | 类型 | 说明 |
-|---|---|---|
-| id | UUID | 主键，自动生成 |
-| username | TEXT | 登录用户名（唯一） |
-| password_hash | TEXT | bcrypt 加密密码 |
-| display_name | TEXT | 显示名称 |
-| role | TEXT | 角色：admin / user |
-| avatar | TEXT | 头像 URL |
-| status | TEXT | 账户状态：active / frozen（冻结即软删除） |
-| created_at | TIMESTAMPTZ | 注册时间 |
-| updated_at | TIMESTAMPTZ | 最后更新时间 |
-
-### conversations — 对话历史表
-
-| 列 | 类型 | 说明 |
-|---|---|---|
-| id | UUID | 主键，自动生成 |
-| user_id | UUID | 所属用户 → profiles.id（CASCADE 删除） |
-| title | TEXT | 对话标题（默认"新对话"） |
-| state_snapshot | JSONB | Agent 状态快照（上下文、用户画像等） |
-| messages | JSONB | 完整消息历史 `[{role, content, files}]` |
-| created_at | TIMESTAMPTZ | 创建时间 |
-| updated_at | TIMESTAMPTZ | 最后更新时间 |
-
-- **索引**: `(user_id, updated_at DESC)` 加速对话列表查询
-
-其余表（crawl_logs、refresh_jobs、refresh_tokens、login_attempts、user_portraits、saved_competitions）的完整定义见 `migration.sql` 和 `migration_auth.sql`。
-
-数据库时区设置为 `Asia/Shanghai`，所有 TIMESTAMPTZ 列以 UTC 存储、北京时间显示。
+- `workflow_dispatch` 手动触发；
+- 每日 18:00 UTC，即次日北京时间 02:00 自动触发；
+- 仅对新增或内容变化的记录重新抽取；
+- 单一来源失败时保留其他来源结果并记录任务状态。
 
 ## 已知限制
 
-- 公开网页的网络状态或页面结构变化可能影响采集结果。
-- 赛事名称、日期、主办方和报名要求应以链接中的官方页面为准。
-- 未配置或无法访问 DeepSeek API 时，复杂意图理解、摘要和通知抽取能力会下降。
-- 推荐质量依赖用户画像完整度；信息不足时系统会继续追问。
-- Word 材料是可编辑初稿，不保证直接满足所有学校或赛事的正式模板。
-- 免费云平台可能休眠，首次访问和首次 Agent 调用可能较慢。
-- Render 512MB 实例开启本地 ONNX embedding 可能造成内存超限，生产环境默认关闭。
-- 未配置 Supabase 时竞赛数据仅在内存中使用，重启或重新部署后丢失。
+- 公共网页结构变化、反爬策略和网络状态会影响采集结果。
+- 竞赛日期和主办方必须以官方页面为最终依据。
+- 当前部分 DataFountain 和 52竞赛日期解析测试未通过，正式验收前需要修复。
+- 当前部分材料对话和异常提示测试未通过，存在流程回归风险。
+- 免费 Render 实例可能休眠，首次访问会较慢。
+- Render 512 MB 实例默认关闭本地 ONNX embedding，使用轻量排序方案。
+- 前端构建主包较大，弱网首屏性能仍可优化。
+- 未配置 Supabase 时，生产竞赛库、账户和会话能力不完整。
+- 生成材料是可编辑初稿，不保证直接满足所有学校或赛事模板。
 
 ## 安全与隐私
 
-- 不要在公开部署中输入身份证号、银行卡号、密码等敏感信息。
-- 不要将 API Key、`.env` 或本地隐私数据提交到 GitHub。
-- 生成材料包含个人信息时，请下载后及时检查，并避免在共享设备上长期保留。
-- 正式报名和提交前必须人工复核全部内容。
+- 不在公开环境输入身份证号、银行卡号、密码等敏感信息。
+- service-role key、数据库密码和 JWT 密钥只能保存在受保护的服务端环境。
+- 生成文件可能包含个人信息，下载后应及时检查并妥善保管。
+- 正式报名和提交前必须人工核验全部内容。
 
-## 设计文档
+## 许可与用途
 
-- [项目规范（中文）](docs/PROJECT_SPEC_CN.md)
-- [Project Specification](docs/PROJECT_SPEC.md)
+本仓库当前主要用于教学、竞赛与研究演示。如需公开运营，应补充明确的软件许可证、隐私政策、数据来源合规说明、用户协议和生产级运维方案。
