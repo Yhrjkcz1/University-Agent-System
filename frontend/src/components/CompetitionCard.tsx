@@ -15,6 +15,7 @@ interface CompetitionCardProps {
   joined?: boolean;
   onAdd?: () => void;
   showActions?: boolean;
+  showAddButton?: boolean;
 }
 
 
@@ -50,6 +51,7 @@ export function CompetitionCard({
   joined = false,
   onAdd,
   showActions = true,
+  showAddButton = true,
 }: CompetitionCardProps) {
 
   const [expanded, setExpanded] = useState(false);
@@ -284,15 +286,17 @@ export function CompetitionCard({
 
                 {showActions && (
           <div style={{ display: 'flex', gap: 8 }}>
-            <Button
-              type="primary"
-              size="small"
-                            disabled={joined}
-              onClick={handleAdd}
-              style={{ borderRadius: 8, fontSize: 13 }}
-            >
-              {joined ? '✓ 已加入' : '加入我的竞赛'}
-            </Button>
+            {showAddButton && (
+              <Button
+                type="primary"
+                size="small"
+                disabled={joined}
+                onClick={handleAdd}
+                style={{ borderRadius: 8, fontSize: 13 }}
+              >
+                {joined ? '✓ 已加入' : '加入我的竞赛'}
+              </Button>
+            )}
 
             <Button
               size="small"

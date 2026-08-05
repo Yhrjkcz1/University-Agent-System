@@ -49,18 +49,34 @@ export async function register(req: RegisterRequest): Promise<TokenResponse> {
   return data;
 }
 
+let refreshPromise: Promise<TokenResponse | null> | null = null;
+
 export async function refreshAccessToken(): Promise<TokenResponse | null> {
+  // 防止并发刷新：多个 401 同时触发时共享同一个刷新请求
+  if (refreshPromise) return refreshPromise;
+
   const refreshToken = getStoredRefreshToken();
   if (!refreshToken) return null;
+
   try {
-    const data = await request<TokenResponse>('/api/auth/refresh', {
-      method: 'POST',
-      body: { refresh_token: refreshToken },
-      // Don't use auth header for refresh calls — no access token yet
-    });
-    storeAuth(data.refresh_token, data.user);
-    return data;
+    refreshPromise = (async () => {
+      try {
+        const data = await request<TokenResponse>('/api/auth/refresh', {
+          method: 'POST',
+          body: { refresh_token: refreshToken },
+        });
+        storeAuth(data.refresh_token, data.user);
+        return data;
+      } catch {
+        clearAuth();
+        return null;
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+    return refreshPromise;
   } catch {
+    refreshPromise = null;
     clearAuth();
     return null;
   }

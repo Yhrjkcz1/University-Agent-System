@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS competitions (
     source        TEXT NOT NULL DEFAULT '',
     publish_date  TEXT NOT NULL DEFAULT '',
     description   TEXT NOT NULL DEFAULT '',
+    summary       TEXT NOT NULL DEFAULT '',
     organizer     TEXT NOT NULL DEFAULT '',
     organizer_list JSONB NOT NULL DEFAULT '[]'::jsonb,
     co_organizers  JSONB NOT NULL DEFAULT '[]'::jsonb,

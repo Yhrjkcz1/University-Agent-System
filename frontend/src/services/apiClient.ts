@@ -58,19 +58,24 @@ export async function request<T = unknown>(
   };
 
   try {
+    // 记录本次请求是否携带了 token —— 未认证的 401 不应清空登录态
+    let sentToken = !!tokenProvider?.();
+
     let response = await doFetch();
 
-    // Auto-refresh on 401
-    if (response.status === 401 && refreshCallback) {
+    // 仅在请求携带了 token 且收到 401 时才尝试刷新（token 可能过期）
+    if (response.status === 401 && sentToken && refreshCallback) {
       const newToken = await refreshCallback();
       if (newToken) {
+        sentToken = true;
         response = await doFetch();
       }
     }
 
     const text = await response.text();
     if (!response.ok) {
-      if (response.status === 401) {
+      // 仅当本次请求携带了 token 且仍返回 401 时，才认为登录态失效
+      if (response.status === 401 && sentToken) {
         localStorage.removeItem("saizhitong_refresh_token");
         localStorage.removeItem("saizhitong_user");
       }

@@ -83,33 +83,6 @@ export function CompetitionsLibrary() {
     }
   };
 
-  // ===== 加载中状态 =====
-  if (loading) {
-    return (
-      <div className="fade-in" style={{ textAlign: 'center', padding: '120px 0' }}>
-        <Spin size="large" tip="正在加载竞赛数据…" />
-      </div>
-    );
-  }
-
-  // ===== 错误状态 =====
-  if (error) {
-    return (
-      <div className="fade-in">
-        <Result
-          status="warning"
-          title="竞赛数据加载失败"
-          subTitle={error}
-          extra={
-            <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-              请检查 Supabase 配置或查看浏览器控制台中的详细错误信息
-            </Typography.Text>
-          }
-        />
-      </div>
-    );
-  }
-
   // 提取所有标签并计数
   const tagStats = useMemo(() => {
     const map = new Map<string, number>();
@@ -120,7 +93,7 @@ export function CompetitionsLibrary() {
     });
     return Array.from(map.entries())
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 20); // 只展示前 20 个热门标签
+      .slice(0, 20);
   }, [competitions]);
 
   // 筛选
@@ -149,6 +122,46 @@ export function CompetitionsLibrary() {
 
   // 搜索或标签切换时重置到第一页
   useEffect(() => setPage(1), [searchText, selectedTag]);
+
+  // ===== 加载中状态 =====
+  if (loading) {
+    return (
+      <div className="fade-in" style={{ textAlign: 'center', padding: '120px 0' }}>
+        <Spin size="large" tip="正在加载竞赛数据…" />
+      </div>
+    );
+  }
+
+  // ===== 错误状态 =====
+  if (error) {
+    return (
+      <div className="fade-in">
+        <Result
+          status="warning"
+          title="竞赛数据加载失败"
+          subTitle={error}
+          extra={
+            <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+              请检查后端服务是否启动，或查看浏览器控制台中的详细错误信息
+            </Typography.Text>
+          }
+        />
+      </div>
+    );
+  }
+
+  // ===== 数据为空（非错误） =====
+  if (competitions.length === 0) {
+    return (
+      <div className="fade-in" style={{ textAlign: 'center', padding: '120px 0' }}>
+        <Result
+          icon={<TrophyOutlined style={{ fontSize: 48, opacity: 0.3 }} />}
+          title="暂无竞赛数据"
+          subTitle="竞赛库为空，可能后端数据尚未同步"
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="fade-in">
@@ -244,10 +257,12 @@ export function CompetitionsLibrary() {
             <CompetitionCard
               competition={item}
               showActions={true}
+              showAddButton={!isAdmin}
               joined={isJoined(item.id)}
               onAdd={() => {
-                addCompetition(item);
-                success('✓ 已加入「' + item.name.slice(0, 16) + '…」');
+                if (addCompetition(item)) {
+                  success('✓ 已加入「' + item.name.slice(0, 16) + '…」');
+                }
               }}
             />
           </Col>
