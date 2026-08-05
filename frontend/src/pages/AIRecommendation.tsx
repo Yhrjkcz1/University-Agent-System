@@ -258,8 +258,9 @@ export function AIRecommendation() {
                 competition={item}
                 joined={isJoined(item.id)}
                 onAdd={() => {
-                  addCompetition(item);
-                  message.success('\u5DF2\u52A0\u5165\u6211\u7684\u7ADE\u8D5B');
+                  if (addCompetition(item)) {
+                    message.success('\u5DF2\u52A0\u5165\u6211\u7684\u7ADE\u8D5B');
+                  }
                 }}
               />
             </div>

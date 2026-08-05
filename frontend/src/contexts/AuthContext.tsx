@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import type { UserInfo } from '../services/authTypes';
 import {
   getStoredRefreshToken,
@@ -24,6 +24,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserInfo | null>(getStoredUser);
   const [loading, setLoading] = useState(!!getStoredRefreshToken());
 
+  // 用 ref 保证 tokenProvider 总是返回最新 token，不依赖 effect 执行顺序
+  const accessTokenRef = useRef<string | null>(null);
+  accessTokenRef.current = accessToken;
+
   const doClearAuth = useCallback(() => {
     clearStoredAuth();
     setAccessToken(null);
@@ -37,7 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Wire token provider and refresh callback into apiClient
   useEffect(() => {
-    setTokenProvider(() => accessToken);
+    setTokenProvider(() => accessTokenRef.current);
     setRefreshCallback(async () => {
       const result = await refreshAccessToken();
       if (result) {
@@ -50,7 +54,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       return null;
     });
-  }, [accessToken]);
+  }, []);
 
   // On mount: try to refresh using stored refresh token
   useEffect(() => {

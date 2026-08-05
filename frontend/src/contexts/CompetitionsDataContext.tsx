@@ -47,14 +47,9 @@ export function CompetitionsDataProvider({ children }: { children: ReactNode }) 
 
         if (cancelled) return;
 
-        if (data.length > 0) {
-          console.log('[CompetitionsData] ✅ 成功加载', data.length, '条');
-          setCompetitions(data);
-          setError(null);
-        } else {
-          console.warn('[CompetitionsData] ⚠️ 无可用数据');
-          setError('暂无竞赛数据');
-        }
+        console.log('[CompetitionsData] ✅ 成功加载', data.length, '条');
+        setCompetitions(data);
+        setError(null);
       } catch (err) {
         if (!cancelled) {
           const msg = err instanceof Error ? err.message : '加载竞赛数据失败';

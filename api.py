@@ -694,8 +694,9 @@ def save_competition(
             "user_id": current_user["id"],
             "competition_id": competition_id,
         }).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("保存竞赛收藏失败 user=%s comp=%s: %s", current_user["id"], competition_id, e)
+        return {"success": False, "detail": str(e)}
     return {"success": True}
 
 

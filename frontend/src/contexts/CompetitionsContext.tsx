@@ -1,11 +1,12 @@
 import { createContext, useContext, useEffect, useState, useCallback, useRef, type ReactNode } from 'react';
 import { type Competition } from '../services/competitions';
 import { useAuth } from './AuthContext';
+import { message } from 'antd';
 import { request } from '../services/apiClient';
 
 interface CompetitionsContextType {
   myCompetitions: Competition[];
-  addCompetition: (competition: Competition) => void;
+  addCompetition: (competition: Competition) => boolean;
   removeCompetition: (id: number) => void;
   isJoined: (id: number) => boolean;
   loading: boolean;
@@ -19,43 +20,55 @@ async function loadFromServer(): Promise<Competition[]> {
 }
 
 export function CompetitionsProvider({ children }: { children: ReactNode }) {
-  const { user } = useAuth();
+  const { user, accessToken } = useAuth();
   const prevUserId = useRef<string | undefined>(undefined);
   const [myCompetitions, setMyCompetitions] = useState<Competition[]>([]);
   const [loading, setLoading] = useState(false);
 
   // 登录/退出 → 重新从服务端加载
   useEffect(() => {
-    if (prevUserId.current === user?.id) return;
-    prevUserId.current = user?.id;
-
-    if (!user) {
+    // 等待 accessToken 就绪后再请求，避免不带 token 的 401
+    if (!user || !accessToken) {
       setMyCompetitions([]);
+      prevUserId.current = undefined;
       return;
     }
+
+    if (prevUserId.current === user.id) return;
+    prevUserId.current = user.id;
 
     setLoading(true);
     loadFromServer()
       .then(setMyCompetitions)
-      .catch(() => {})
+      .catch((err) => {
+        console.error('[Competitions] 加载我的竞赛失败:', err);
+      })
       .finally(() => setLoading(false));
-  }, [user]);
+  }, [user, accessToken]);
 
-  const addCompetition = useCallback((competition: Competition) => {
+  const addCompetition = useCallback((competition: Competition): boolean => {
+    if (!user) {
+      message.warning('请先登录后再添加竞赛');
+      return false;
+    }
     setMyCompetitions((prev) => {
       if (prev.some((item) => item.id === competition.id)) return prev;
       return [...prev, competition];
     });
-    if (user) {
-      request(`/api/saved-competitions/${competition.id}`, { method: 'POST' }).catch(() => {});
-    }
+    request(`/api/saved-competitions/${competition.id}`, { method: 'POST' }).catch((err) => {
+      console.error('[Competitions] 添加收藏失败:', err);
+      setMyCompetitions((prev) => prev.filter((item) => item.id !== competition.id));
+    });
+    return true;
   }, [user]);
 
   const removeCompetition = useCallback((id: number) => {
+    if (!user) return;
     setMyCompetitions((prev) => prev.filter((item) => item.id !== id));
-    if (user) {
-      request(`/api/saved-competitions/${id}`, { method: 'DELETE' }).catch(() => {});
-    }
+    request(`/api/saved-competitions/${id}`, { method: 'DELETE' }).catch((err) => {
+      console.error('[Competitions] 移除收藏失败:', err);
+      loadFromServer().then(setMyCompetitions).catch(() => {});
+    });
   }, [user]);
 
   const isJoined = useCallback(

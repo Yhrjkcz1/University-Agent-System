@@ -360,8 +360,9 @@ export function Home() {
                 showActions={true}
                 joined={isJoined(item.id)}
                 onAdd={() => {
-                  addCompetition(item);
-                  message.success('✓ 已加入「' + item.name.slice(0, 16) + '…」');
+                  if (addCompetition(item)) {
+                    message.success('✓ 已加入「' + item.name.slice(0, 16) + '…」');
+                  }
                 }}
               />
             </Col>
