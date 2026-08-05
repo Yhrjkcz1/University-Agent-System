@@ -1,9 +1,24 @@
+import { useState, type ReactNode } from 'react';
 import { Layout, Typography, Dropdown, Button, Avatar, Space } from 'antd';
-import { UserOutlined, LogoutOutlined, SettingOutlined } from '@ant-design/icons';
-import { ReactNode } from 'react';
+import {
+  UserOutlined,
+  LogoutOutlined,
+  SettingOutlined,
+  LockOutlined,
+  SafetyOutlined,
+  DeleteOutlined,
+} from '@ant-design/icons';
 import { useAuth } from '../contexts/AuthContext';
 import { logout } from '../services/authService';
 import { designTokens } from '../styles/tokens';
+import {
+  EditProfileModal,
+  ChangePasswordModal,
+  SessionManagerModal,
+  DeleteAccountModal,
+} from '../components/UserSettingsModals';
+
+type ModalType = 'profile' | 'password' | 'sessions' | 'delete' | null;
 
 interface AppLayoutProps {
   children: ReactNode;
@@ -12,6 +27,7 @@ interface AppLayoutProps {
 
 export function AppLayout({ children, onLoginClick }: AppLayoutProps) {
   const { user, clearAuth, isAdmin } = useAuth();
+  const [modal, setModal] = useState<ModalType>(null);
 
   const handleLogout = async () => {
     await logout();
@@ -21,7 +37,7 @@ export function AppLayout({ children, onLoginClick }: AppLayoutProps) {
   const userMenu = {
     items: [
       {
-        key: 'profile',
+        key: 'username',
         icon: <UserOutlined />,
         label: user?.display_name || user?.username || '用户',
         disabled: true,
@@ -38,6 +54,29 @@ export function AppLayout({ children, onLoginClick }: AppLayoutProps) {
           ]
         : []),
       {
+        key: 'profile',
+        icon: <UserOutlined />,
+        label: '个人信息',
+      },
+      {
+        key: 'password',
+        icon: <LockOutlined />,
+        label: '修改密码',
+      },
+      {
+        key: 'sessions',
+        icon: <SafetyOutlined />,
+        label: '会话管理',
+      },
+      { type: 'divider' as const },
+      {
+        key: 'delete',
+        icon: <DeleteOutlined />,
+        label: '删除账号',
+        danger: true,
+      },
+      { type: 'divider' as const },
+      {
         key: 'logout',
         icon: <LogoutOutlined />,
         label: '退出登录',
@@ -46,9 +85,10 @@ export function AppLayout({ children, onLoginClick }: AppLayoutProps) {
     ],
     onClick: ({ key }: { key: string }) => {
       if (key === 'logout') handleLogout();
-      if (key === 'admin' && onLoginClick) {
-        // Admin dashboard is a tab, no action needed here
-      }
+      else if (key === 'profile') setModal('profile');
+      else if (key === 'password') setModal('password');
+      else if (key === 'sessions') setModal('sessions');
+      else if (key === 'delete') setModal('delete');
     },
   };
 
@@ -102,6 +142,12 @@ export function AppLayout({ children, onLoginClick }: AppLayoutProps) {
       >
         用 AI 帮你找到更适合的竞赛
       </Layout.Footer>
+
+      {/* 用户设置弹窗 */}
+      <EditProfileModal open={modal === 'profile'} onClose={() => setModal(null)} />
+      <ChangePasswordModal open={modal === 'password'} onClose={() => setModal(null)} />
+      <SessionManagerModal open={modal === 'sessions'} onClose={() => setModal(null)} />
+      <DeleteAccountModal open={modal === 'delete'} onClose={() => setModal(null)} />
     </Layout>
   );
 }

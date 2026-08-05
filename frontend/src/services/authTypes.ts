@@ -40,6 +40,14 @@ export interface UserPortrait {
   completeness: number;
 }
 
+export interface SessionInfo {
+  id: string;
+  device_info: string;
+  created_at: string;
+  last_used_at: string;
+  is_current: boolean;
+}
+
 export interface ConversationSummary {
   id: string;
   title: string;

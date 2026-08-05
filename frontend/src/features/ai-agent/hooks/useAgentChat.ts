@@ -21,8 +21,9 @@ function mapRecommendations(rawRows: unknown): Competition[] {
       const detail: DimensionalScores | undefined = rec.detail
         ? { ...rec.detail }
         : undefined;
+      const numId = Number(rec.id);
       return {
-        id: rec.id || -(idx + 1),
+        id: Number.isFinite(numId) ? numId : -(idx + 1),
         name: rec.title || rec.name || "未命名竞赛",
         summary: rec.summary || rec.description || "",
         difficulty:
