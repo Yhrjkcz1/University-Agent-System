@@ -571,6 +571,8 @@ class InfoExtractAgent:
         validated["_source_title"] = raw_item.get("title", "")
         validated["_source"] = raw_item.get("source", "")
         validated["_collected_at"] = raw_item.get("collected_at", "")
+        if raw_item.get("id") is not None:
+            validated["id"] = raw_item["id"]
         # P2-1: 统一后处理校验 summary 质量
         validated["summary"] = self._normalize_summary(validated.get("summary", ""))
         return validated
@@ -673,6 +675,7 @@ class InfoExtractAgent:
             "_source_title": raw_item.get("title", ""),
             "_source": raw_item.get("source", ""),
             "_collected_at": raw_item.get("collected_at", ""),
+            "id": raw_item.get("id"),
         }
 
     # ── 逐条抽取（保留，供批量降级时使用）───────────────

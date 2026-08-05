@@ -287,6 +287,7 @@ class RecommendationAgent:
             level_code, _ = to_level(total, self.level_thresholds)
             level_code = apply_level_cap(level_code, detail, caps)
             recommendations.append({
+                "id": item.get("id"),
                 "title": item.get("title", "未知项目"),
                 "match_score": total,
                 "recommend_level": level_code,
@@ -350,6 +351,7 @@ class RecommendationAgent:
             level_code, _ = to_level(total, self.level_thresholds)
             level_code = apply_level_cap(level_code, detail, caps)
             return {
+                "id": item.get("id"),
                 "title": item.get("title", "未知项目"),
                 "match_score": total,
                 "recommend_level": level_code,
@@ -384,7 +386,8 @@ class RecommendationAgent:
 
         for idx, rec in enumerate(recommendations, 1):
             rec["rank"] = idx
-            rec["id"] = f"rec_{idx}"
+            if not rec.get("id"):
+                rec["id"] = f"rec_{idx}"
             # 备选时刷新 action 文案
             if rec.get("is_backup"):
                 rec["suggested_action"] = build_action(

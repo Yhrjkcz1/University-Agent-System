@@ -1,5 +1,5 @@
 import { request } from './apiClient';
-import type { LoginRequest, RegisterRequest, TokenResponse, UserInfo, UserPortrait } from './authTypes';
+import type { LoginRequest, RegisterRequest, TokenResponse, UserInfo, UserPortrait, SessionInfo } from './authTypes';
 
 const TOKEN_KEY = 'saizhitong_refresh_token';
 const USER_KEY = 'saizhitong_user';
@@ -126,6 +126,19 @@ export async function changePassword(oldPassword: string, newPassword: string): 
 export async function deleteAccount(): Promise<void> {
   await request('/api/auth/me', { method: 'DELETE' });
   clearAuth();
+}
+
+export async function fetchSessions(): Promise<SessionInfo[]> {
+  try {
+    const data = await request<{ sessions: SessionInfo[] }>('/api/auth/me/sessions');
+    return data.sessions;
+  } catch {
+    return [];
+  }
+}
+
+export async function revokeSession(sessionId: string): Promise<void> {
+  await request(`/api/auth/me/sessions/${sessionId}`, { method: 'DELETE' });
 }
 
 export async function fetchPortrait(): Promise<UserPortrait | null> {
