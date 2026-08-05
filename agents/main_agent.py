@@ -1276,13 +1276,38 @@ class MainAgent:
             recommendations = self._recommendations_from_result(previous_result)
             if len(recommendations) < 2:
                 return None
-            answer = self._build_comparison_answer(recommendations, user_input, state)
+            selected, positions, selection_error = self._select_recommendations_for_comparison(
+                recommendations,
+                user_input,
+            )
+            if selection_error:
+                return self._build_output(
+                    task_id=self._get_task_id(previous_result),
+                    status="need_input",
+                    data={"final_answer": selection_error},
+                    message="MainAgent needs valid comparison references.",
+                    next_action="ask_user",
+                    metadata={
+                        "followup_type": "competition_comparison_clarification",
+                        "agents_dispatched": [],
+                    },
+                )
+            answer = self._build_comparison_answer(
+                selected,
+                user_input,
+                state,
+                positions=positions,
+            )
             return self._build_output(
                 task_id=self._get_task_id(previous_result),
                 status="success",
-                data={"final_answer": answer, "compared_competitions": recommendations[:3]},
+                data={"final_answer": answer, "compared_competitions": selected},
                 message="MainAgent compared previous recommendations.",
-                metadata={"followup_type": "competition_comparison", "generation_source": "deterministic"},
+                metadata={
+                    "followup_type": "competition_comparison",
+                    "generation_source": "deterministic",
+                    "compared_positions": positions,
+                },
             )
         if not self._is_competition_detail_request(user_input):
             return None
@@ -1547,20 +1572,84 @@ class MainAgent:
 
     def _build_comparison_answer(
         self,
-        recommendations: list[dict[str, Any]],
+        selected: list[dict[str, Any]],
         user_input: str,
         state: dict[str, Any],
+        positions: list[int] | None = None,
     ) -> str:
-        selected = recommendations[:2]
         goal = "保研" if "保研" in user_input or "保研" in state.get("development_goals", []) else "你的当前需求"
-        lines = [f"可以，我先按**{goal}**来比较前两个候选："]
-        for index, item in enumerate(selected, 1):
-            title = str(item.get("title") or f"候选 {index}")
+        position_text = "和".join(f"第{value}个" for value in (positions or []))
+        target_text = f"{position_text}候选" if position_text else "这几个候选"
+        lines = [f"可以，我先按**{goal}**来比较{target_text}："]
+        for display_index, item in enumerate(selected):
+            position = positions[display_index] if positions and display_index < len(positions) else display_index + 1
+            title = str(item.get("title") or f"候选 {position}")
             reason = str(item.get("reason") or item.get("summary") or "现有数据没有给出完整推荐理由").strip()
             deadline = str(item.get("deadline") or "待核实").strip()
-            lines.append(f"{index}. **{title}**；截止时间：{deadline}；{reason}")
+            lines.append(f"{position}. **{title}**；截止时间：{deadline}；{reason}")
         lines.append("如果以保研为目标，还需要结合你所在学校的竞赛认定目录判断，当前数据不能直接证明某项比赛一定能获得加分。")
         return "\n\n".join(lines)
+
+    @classmethod
+    def _select_recommendations_for_comparison(
+        cls,
+        recommendations: list[dict[str, Any]],
+        message: str,
+    ) -> tuple[list[dict[str, Any]], list[int], str]:
+        """Resolve explicit comparison ordinals without relying on LLM output."""
+        text = str(message or "").strip()
+        count = len(recommendations)
+
+        prefix_match = re.search(r"前\s*([一二三四五六七八九十\d]+)\s*(?:个|项)?", text)
+        if prefix_match:
+            prefix_count = cls._parse_chinese_ordinal(prefix_match.group(1))
+            if prefix_count is None or prefix_count < 2:
+                return [], [], "请至少选择两个不同的竞赛进行比较。"
+            if prefix_count > count:
+                return [], [], f"当前只有 {count} 个推荐，无法比较前 {prefix_count} 个。"
+            positions = list(range(1, prefix_count + 1))
+            return [recommendations[index - 1] for index in positions], positions, ""
+
+        ordinal_tokens = re.findall(
+            r"第\s*([一二三四五六七八九十\d]+)\s*(?:个|项)?",
+            text,
+        )
+        positions: list[int] = []
+        for token in ordinal_tokens:
+            value = cls._parse_chinese_ordinal(token)
+            if value is not None and value not in positions:
+                positions.append(value)
+
+        if ordinal_tokens and len(positions) < 2:
+            return [], [], "我知道你想比较其中一个竞赛，请再告诉我另一个竞赛的序号。"
+        if positions:
+            invalid = [value for value in positions if value < 1 or value > count]
+            if invalid:
+                invalid_text = "、".join(str(value) for value in invalid)
+                return [], [], f"当前只有 {count} 个推荐，第 {invalid_text} 个超出了范围。请重新选择两个有效序号。"
+            return [recommendations[index - 1] for index in positions], positions, ""
+
+        positions = [1, 2]
+        return recommendations[:2], positions, ""
+
+    @staticmethod
+    def _parse_chinese_ordinal(value: str) -> int | None:
+        token = str(value or "").strip()
+        if token.isdigit():
+            return int(token)
+        digits = {
+            "一": 1,
+            "二": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "七": 7,
+            "八": 8,
+            "九": 9,
+            "十": 10,
+        }
+        return digits.get(token)
 
     def _call_detail_llm(
         self,

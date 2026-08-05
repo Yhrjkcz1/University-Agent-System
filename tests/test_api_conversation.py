@@ -68,6 +68,95 @@ def _recommendation_result():
     }
 
 
+def _comparison_result(count=5):
+    recommendations = [
+        {
+            "title": f"竞赛{index}",
+            "summary": f"第{index}个候选的摘要",
+            "deadline": f"2026-09-{index:02d}",
+        }
+        for index in range(1, count + 1)
+    ]
+    return {
+        "task_id": "comparison-task",
+        "status": "success",
+        "data": {
+            "agent_results": [
+                {
+                    "agent_name": "RecommendationAgent",
+                    "status": "success",
+                    "data": {"recommendations": recommendations},
+                }
+            ]
+        },
+    }
+
+
+def test_comparison_uses_explicit_fourth_and_fifth_recommendations():
+    agent = _agent()
+
+    result = agent.handle_followup(
+        "比较你推荐的第四个和第五个竞赛",
+        _comparison_result(),
+        {"intent": "recommendation"},
+    )
+
+    assert result is not None
+    answer = result["data"]["final_answer"]
+    compared = result["data"]["compared_competitions"]
+    assert [item["title"] for item in compared] == ["竞赛4", "竞赛5"]
+    assert result["metadata"]["compared_positions"] == [4, 5]
+    assert "竞赛4" in answer
+    assert "竞赛5" in answer
+    assert "竞赛1" not in answer
+    assert "竞赛2" not in answer
+
+
+def test_comparison_without_explicit_positions_keeps_first_two_default():
+    agent = _agent()
+
+    result = agent.handle_followup(
+        "帮我比较一下这些竞赛",
+        _comparison_result(),
+        {"intent": "recommendation"},
+    )
+
+    assert result is not None
+    assert [
+        item["title"] for item in result["data"]["compared_competitions"]
+    ] == ["竞赛1", "竞赛2"]
+    assert result["metadata"]["compared_positions"] == [1, 2]
+
+
+def test_comparison_with_one_position_requests_another_reference():
+    agent = _agent()
+
+    result = agent.handle_followup(
+        "比较第四个竞赛",
+        _comparison_result(),
+        {"intent": "recommendation"},
+    )
+
+    assert result is not None
+    assert result["status"] == "need_input"
+    assert "另一个竞赛" in result["data"]["final_answer"]
+
+
+def test_comparison_rejects_positions_outside_recommendation_range():
+    agent = _agent()
+
+    result = agent.handle_followup(
+        "比较第五个和第八个竞赛",
+        _comparison_result(),
+        {"intent": "recommendation"},
+    )
+
+    assert result is not None
+    assert result["status"] == "need_input"
+    assert "只有 5 个推荐" in result["data"]["final_answer"]
+    assert "第 8 个" in result["data"]["final_answer"]
+
+
 def test_llm_unavailable_is_explicit_and_preserves_state(monkeypatch):
     agent = _agent()
     state = agent.new_conversation_state()
